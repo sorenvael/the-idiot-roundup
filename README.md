@@ -1,43 +1,51 @@
 # 🤠 The Idiot Roundup
 
-**Find every repost of your short-form video across the internet.**
+**Find every repost of your stolen videos across the internet.**
 
-Paste a TikTok, Instagram Reel, or YouTube Short link — The Idiot Roundup uses AI-powered web search to track down every account that reposted your content.
+Paste a TikTok, Instagram Reel, or YouTube Short link — The Idiot Roundup uses AI-powered web search to track down every account that reposted your content, plus news articles and reaction videos.
 
 ---
 
-## Quick Deploy
+## What It Does
+
+- Searches TikTok, Instagram, YouTube, Facebook, Twitter/X for video reposts
+- Finds news articles, blog posts, and media coverage about your video
+- Pulls real video metadata and thumbnails via oEmbed APIs
+- Groups results by platform with confidence scoring
+- Caches results so the same URL doesn't burn API credits twice
+
+---
+
+## Quick Deploy on Vercel
 
 ### 1. Get an Anthropic API Key
 
 1. Go to [console.anthropic.com](https://console.anthropic.com/)
-2. Sign up or log in
-3. Navigate to **Settings → API Keys**
-4. Click **Create Key** and copy it — you'll need it in step 3
+2. Navigate to **Settings → API Keys**
+3. Click **Create Key** and copy it
 
-### 2. Push to GitHub
+### 2. Deploy
+
+1. Push this repo to GitHub
+2. Go to [vercel.com/new](https://vercel.com/new) and import the repo
+3. Add environment variable: `ANTHROPIC_API_KEY` = your key
+4. Click **Deploy**
+
+Your site will be live at `https://the-idiot-roundup.vercel.app` (or similar).
+
+---
+
+## Run Locally
 
 ```bash
-# Create a new repo on GitHub, then:
-git init
-git add .
-git commit -m "Initial commit - The Idiot Roundup"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/the-idiot-roundup.git
-git push -u origin main
+# Install Python dependency
+pip3 install requests
+
+# Set your API key and run
+ANTHROPIC_API_KEY=sk-ant-your-key-here python3 server.py
 ```
 
-### 3. Deploy on Vercel
-
-1. Go to [vercel.com](https://vercel.com) and sign in with GitHub
-2. Click **"Add New Project"**
-3. Import your `the-idiot-roundup` repository
-4. Under **Environment Variables**, add:
-   - **Name:** `ANTHROPIC_API_KEY`
-   - **Value:** your API key from step 1
-5. Click **Deploy**
-
-That's it! Your site will be live at `https://the-idiot-roundup.vercel.app` (or similar).
+Open **http://localhost:3000** and start rounding up idiots.
 
 ---
 
@@ -46,38 +54,23 @@ That's it! Your site will be live at `https://the-idiot-roundup.vercel.app` (or 
 ```
 the-idiot-roundup/
 ├── public/
-│   └── index.html        # Frontend UI
+│   └── index.html          # Frontend UI
 ├── api/
-│   └── search.js          # Serverless API (proxies to Anthropic)
+│   └── search.js           # Vercel serverless function
+├── server.py               # Local Python server
 ├── package.json
-├── vercel.json             # Vercel routing config
+├── vercel.json              # Vercel routing config
 ├── .env.example
 └── .gitignore
 ```
 
-## How It Works
+## Tech Stack
 
-1. **You paste a video URL** → the frontend extracts metadata from the link
-2. **Perceptual fingerprint** → generates a hash to identify the video
-3. **AI search** → the `/api/search` serverless function calls Claude with web search enabled to find reposts
-4. **Results** → matched reposts are displayed with platform, account, confidence score, and direct links
-
-## Local Development
-
-```bash
-npm install
-cp .env.example .env       # Add your API key
-npx vercel dev              # Runs at http://localhost:3000
-```
-
-## Future Improvements
-
-- **Real video fingerprinting** with pHash/dHash on actual video frames
-- **yt-dlp integration** to download and analyze source videos
-- **Google Vision API** for reverse image search on thumbnails
-- **Platform APIs** (TikTok, YouTube, Instagram) for deeper searches
-- **Database** to cache results and monitor for new reposts over time
-- **Email alerts** when new reposts are detected
+- **Frontend:** Single-file HTML/CSS/JS — dark theme, mobile responsive
+- **Search:** Anthropic Claude API with web search tool
+- **Metadata:** TikTok, YouTube, and Instagram oEmbed APIs
+- **Deploy:** Vercel serverless functions
+- **Local:** Python stdlib HTTP server + requests
 
 ---
 
