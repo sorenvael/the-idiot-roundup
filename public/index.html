@@ -335,8 +335,46 @@ textarea.in98{resize:vertical;min-height:40px}
 }
 .tag-yes{background:#00ff00;color:#000;border-color:#008000}
 .tag-maybe{background:#ffff00;color:#000;border-color:#808000}
-.tag-own{background:#00ff00;color:#000;border-color:#008000}
+.tag-own{background:#ff6600;color:#fff;border-color:#cc3300;text-shadow:1px 1px 0 #000}
 .tag-seed{background:#00ffff;color:#000;border-color:#008080}
+
+/* ── PLATFORM EMOJI ── */
+.vcard-plat{
+  font-size:18px;
+  flex-shrink:0;
+  width:26px;
+  text-align:center;
+  filter:drop-shadow(1px 1px 0 rgba(0,0,0,0.3));
+}
+
+/* ── FEEDBACK BUTTONS ── */
+.vcard-fb{
+  display:flex;gap:2px;flex-shrink:0;
+}
+.fb-btn{
+  width:20px;height:20px;
+  background:#c0c0c0;
+  border:1px solid;
+  border-color:#dfdfdf #808080 #808080 #dfdfdf;
+  display:flex;align-items:center;justify-content:center;
+  font-size:11px;
+  cursor:pointer;
+  padding:0;
+  line-height:1;
+}
+.fb-btn:active{border-color:#808080 #dfdfdf #dfdfdf #808080}
+.fb-btn.picked{background:#000080;border-color:#000060 #4040c0 #4040c0 #000060}
+.fb-btn.picked-bad{background:#800000;border-color:#600000 #c04040 #c04040 #600000}
+.vcard.hidden-card{
+  opacity:0.3;
+  text-decoration:line-through;
+  pointer-events:none;
+  max-height:0;
+  overflow:hidden;
+  padding:0;
+  border:0;
+  transition:all 0.3s ease;
+}
 
 /* ── DECORATIVE ERROR DIALOGS ── */
 .deco-error{
@@ -777,24 +815,98 @@ function switchMode(m){
   $('statusText').textContent='Mode: '+(m==='repost'?'Repost Finder':'Event Finder');
 }
 
+// ── Platform emoji map ──
+function platEmoji(r){
+  const p=(r.platform||'').toLowerCase();
+  const url=(r.url||'').toLowerCase();
+  if(p==='tiktok'||url.includes('tiktok.com')) return '🎵';
+  if(p==='instagram'||url.includes('instagram.com')) return '📸';
+  if(p==='youtube'||url.includes('youtube.com')||url.includes('youtu.be')) return '📺';
+  if(p==='facebook'||url.includes('facebook.com')) return '👥';
+  if(p==='twitter'||p==='x'||url.includes('twitter.com')||url.includes('x.com')) return '🐦';
+  if(p==='other'||url.includes('news')||url.includes('article')||url.includes('blog')) return '📰';
+  return '🔗';
+}
+
+// ── Feedback memory (persists in this session, teaches future searches) ──
+const feedbackMemory={good:new Set(),bad:new Set()};
+try{
+  const saved=JSON.parse(localStorage.getItem('ir_feedback')||'{}');
+  if(saved.good) saved.good.forEach(u=>feedbackMemory.good.add(u));
+  if(saved.bad) saved.bad.forEach(u=>feedbackMemory.bad.add(u));
+}catch(e){}
+
+function saveFeedback(){
+  try{
+    localStorage.setItem('ir_feedback',JSON.stringify({
+      good:[...feedbackMemory.good],
+      bad:[...feedbackMemory.bad]
+    }));
+  }catch(e){}
+}
+
+function markGood(url,cardEl){
+  feedbackMemory.good.add(url);
+  feedbackMemory.bad.delete(url);
+  saveFeedback();
+  const btns=cardEl.querySelectorAll('.fb-btn');
+  btns[0].classList.add('picked');
+  btns[1].classList.remove('picked-bad');
+}
+
+function markBad(url,cardEl){
+  feedbackMemory.bad.add(url);
+  feedbackMemory.good.delete(url);
+  saveFeedback();
+  // Animate out
+  cardEl.classList.add('hidden-card');
+  setTimeout(()=>cardEl.remove(),400);
+}
+
+function isKnownBad(url){return feedbackMemory.bad.has(url)}
+
 function mkCard(r,own){
-  const a=document.createElement('a');a.href=r.url;a.target='_blank';a.rel='noopener';
-  a.className='vcard';
-  const thumb=r.thumbnail?`<img src="${r.thumbnail}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<span class=ph>♪</span>'">`:'<span class="ph">♪</span>';
+  // Skip results the user previously marked bad
+  if(isKnownBad(r.url)) return null;
+
+  const card=document.createElement('div');
+  card.className='vcard';
+
+  const emoji=platEmoji(r);
+  const thumb=r.thumbnail?`<img src="${r.thumbnail}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<span class=ph>${emoji}</span>'">`:`<span class="ph">${emoji}</span>`;
+
   let tagHtml='';
-  if(own)tagHtml='<span class="vcard-tag tag-own">YOUR PAGE</span>';
-  else if(r.vision_match==='YES')tagHtml='<span class="vcard-tag tag-yes">MATCH ✓</span>';
-  else if(r.vision_match==='MAYBE')tagHtml='<span class="vcard-tag tag-maybe">POSSIBLE</span>';
-  else if(r.is_seed)tagHtml='<span class="vcard-tag tag-seed">VERIFIED</span>';
+  if(own) tagHtml='<span class="vcard-tag tag-own">OURS</span>';
+  else if(r.vision_match==='YES') tagHtml='<span class="vcard-tag tag-yes">MATCH ✓</span>';
+  else if(r.vision_match==='MAYBE') tagHtml='<span class="vcard-tag tag-maybe">POSSIBLE</span>';
+  else if(r.is_seed) tagHtml='<span class="vcard-tag tag-seed">VERIFIED</span>';
+
   const stats=(r.stats&&(r.stats.plays||r.stats.likes))?`<div class="vcard-stats">${r.stats.plays?'<span>'+fmt(r.stats.plays)+' views</span>':''}${r.stats.likes?'<span>'+fmt(r.stats.likes)+' likes</span>':''}${r.stats.shares?'<span>'+fmt(r.stats.shares)+' shares</span>':''}</div>`:'';
-  a.innerHTML=`<div class="vcard-thumb">${thumb}</div><div class="vcard-info"><div class="vcard-name">${r.account_name||'@unknown'}</div><div class="vcard-desc">${(r.description||'').slice(0,80)}</div>${stats}</div><div class="vcard-end">${tagHtml}</div>`;
-  return a;
+
+  const isGood=feedbackMemory.good.has(r.url);
+
+  card.innerHTML=`<div class="vcard-plat">${emoji}</div><div class="vcard-thumb">${thumb}</div><div class="vcard-info"><div class="vcard-name">${r.account_name||'@unknown'}</div><div class="vcard-desc">${(r.description||'').slice(0,80)}</div>${stats}</div><div class="vcard-end"><div class="vcard-fb"><button class="fb-btn${isGood?' picked':''}" title="Good result">✓</button><button class="fb-btn" title="Bad result — hide &amp; teach">✗</button></div>${tagHtml}</div>`;
+
+  // Link — clicking the main card area opens the URL
+  card.style.cursor='pointer';
+  card.addEventListener('click',e=>{
+    if(e.target.closest('.fb-btn')) return; // don't open link on feedback click
+    window.open(r.url,'_blank','noopener');
+  });
+
+  // Feedback button handlers
+  const btns=card.querySelectorAll('.fb-btn');
+  btns[0].addEventListener('click',e=>{e.stopPropagation();markGood(r.url,card)});
+  btns[1].addEventListener('click',e=>{e.stopPropagation();markBad(r.url,card)});
+
+  return card;
 }
 
 function renderCards(list,id,own){
   const c=$(id);c.innerHTML='';
-  if(!list.length){c.innerHTML='<div style="padding:12px;text-align:center;color:#808080;font-size:11px">No matches found.</div>';return}
-  list.forEach(r=>c.appendChild(mkCard(r,own)));
+  const filtered=list.filter(r=>!isKnownBad(r.url));
+  if(!filtered.length){c.innerHTML='<div style="padding:12px;text-align:center;color:#808080;font-size:11px">No matches found.</div>';return}
+  filtered.forEach(r=>{const card=mkCard(r,own);if(card)c.appendChild(card)});
 }
 
 async function doRepost(){
