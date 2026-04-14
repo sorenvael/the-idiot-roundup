@@ -325,7 +325,99 @@ def vision_filter_results(results, max_concurrent=5, vision_prompt=None):
 EXCLUDE_KEYWORDS = {"tampa", "florida", "raymond james", "harley davidson",
                      "harley bike", "motorcycle", "hockey", "nhl", "nfl", "nba",
                      "wedding", "shane gillis"}
-MAX_AGE_SECONDS = 7 * 24 * 60 * 60  # 7 days for presentation
+MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
+
+
+# ── Scrape our own accounts for matching posts ─────────────
+def scrape_own_accounts(event_info, max_concurrent=5):
+    """Scrape all 36 accounts on TikTok via Apify, find posts matching the event."""
+    description = event_info.get('description', '').lower()
+    event = event_info.get('event', '').lower()
+    keywords_str = event_info.get('keywords', '')
+    keywords = [k.strip().lower() for k in keywords_str.split(',') if k.strip()]
+
+    # Build match terms from all user input
+    match_terms = set()
+    for kw in keywords:
+        match_terms.add(kw)
+    # Add key words from event name
+    for w in event.split():
+        if len(w) > 3:
+            match_terms.add(w)
+    # Add key words from description
+    for w in description.split():
+        if len(w) > 4:
+            match_terms.add(w)
+
+    print(f"  [own-scrape] Scraping {len(DEFAULT_OWN_ACCOUNTS)} accounts...", file=sys.stderr)
+    print(f"  [own-scrape] Match terms: {list(match_terms)[:10]}...", file=sys.stderr)
+
+    all_own_posts = []
+    seen_urls = set()
+
+    # Batch accounts into groups to avoid too many Apify runs
+    account_list = sorted(DEFAULT_OWN_ACCOUNTS)
+    batches = []
+    batch_size = 5
+    for i in range(0, len(account_list), batch_size):
+        batches.append(account_list[i:i+batch_size])
+
+    for batch_idx, batch in enumerate(batches):
+        print(f"  [own-scrape] Batch {batch_idx+1}/{len(batches)}: {batch}", file=sys.stderr)
+
+        # Scrape each account's recent posts using Apify TikTok profile scraper
+        def scrape_account(acct):
+            try:
+                # Use the TikTok scraper to get recent posts from a profile
+                profile_urls = [f"https://www.tiktok.com/@{acct}"]
+                items = run_apify_actor("clockworks~tiktok-scraper",
+                    {"profileUrls": profile_urls, "resultsPerPage": 30,
+                     "shouldDownloadCovers": False, "shouldDownloadVideos": False,
+                     "shouldDownloadSlideshowImages": False},
+                    label=f"profile @{acct}", poll_interval=3, max_polls=20)
+                return acct, items
+            except Exception as e:
+                print(f"  [own-scrape] @{acct} failed: {e}", file=sys.stderr)
+                return acct, []
+
+        with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
+            futures = {pool.submit(scrape_account, acct): acct for acct in batch}
+            for future in as_completed(futures):
+                try:
+                    acct, items = future.result()
+                except Exception:
+                    continue
+
+                matched = 0
+                for item in items:
+                    parsed = parse_apify_item(item, seen_urls)
+                    if not parsed:
+                        continue
+
+                    # Check if post matches the event/moment
+                    post_desc = (parsed.get("description") or "").lower()
+                    post_url = parsed.get("url", "")
+
+                    # Match if any keyword appears in the post description
+                    is_match = False
+                    if match_terms:
+                        for term in match_terms:
+                            if term in post_desc:
+                                is_match = True
+                                break
+                    else:
+                        # No match terms = include all recent posts
+                        is_match = True
+
+                    if is_match:
+                        parsed["vision_match"] = "YES"  # our own posts are always valid
+                        all_own_posts.append(parsed)
+                        matched += 1
+
+                print(f"  [own-scrape] @{acct}: {len(items)} posts scraped, {matched} matched", file=sys.stderr)
+
+    print(f"  [own-scrape] Total: {len(all_own_posts)} matching posts from our accounts", file=sys.stderr)
+    return all_own_posts
 
 def filter_results(results):
     now = time.time()
@@ -518,21 +610,61 @@ class Handler(SimpleHTTPRequestHandler):
 
             # ── No more hardcoded seeds — results are fully dynamic ──
 
-            own, others = split_results(final, own_accounts)
+            # ── Step 5: Scrape our own accounts for matching posts ──
+            print(f"  [step5] Scraping {len(DEFAULT_OWN_ACCOUNTS)} own accounts...", file=sys.stderr)
+            own_scraped = scrape_own_accounts(body)
+            print(f"  [step5] {len(own_scraped)} posts from own accounts", file=sys.stderr)
 
-            totals = {"plays": 0, "likes": 0, "comments": 0, "shares": 0}
-            for r in final:
+            # Split the general search results into own vs others
+            own_from_search, others = split_results(final, own_accounts)
+
+            # Merge own posts: scraped + found in general search (deduplicate)
+            own_urls = {r["url"] for r in own_scraped}
+            for r in own_from_search:
+                if r["url"] not in own_urls:
+                    own_scraped.append(r)
+                    own_urls.add(r["url"])
+            own = own_scraped
+
+            # ── Calculate stats: separate own vs others vs combined ──
+            own_totals = {"plays": 0, "likes": 0, "comments": 0, "shares": 0, "count": len(own)}
+            for r in own:
                 s = r.get("stats", {})
-                totals["plays"] += s.get("plays", 0) or 0
-                totals["likes"] += s.get("likes", 0) or 0
-                totals["comments"] += s.get("comments", 0) or 0
-                totals["shares"] += s.get("shares", 0) or 0
+                own_totals["plays"] += s.get("plays", 0) or 0
+                own_totals["likes"] += s.get("likes", 0) or 0
+                own_totals["comments"] += s.get("comments", 0) or 0
+                own_totals["shares"] += s.get("shares", 0) or 0
 
-            print(f"  [done] {len(final)} videos ({len(own)} own, {len(others)} others)", file=sys.stderr)
-            print(f"  [stats] {totals}", file=sys.stderr)
+            other_totals = {"plays": 0, "likes": 0, "comments": 0, "shares": 0, "count": len(others)}
+            for r in others:
+                s = r.get("stats", {})
+                other_totals["plays"] += s.get("plays", 0) or 0
+                other_totals["likes"] += s.get("likes", 0) or 0
+                other_totals["comments"] += s.get("comments", 0) or 0
+                other_totals["shares"] += s.get("shares", 0) or 0
+
+            totals = {
+                "plays": own_totals["plays"] + other_totals["plays"],
+                "likes": own_totals["likes"] + other_totals["likes"],
+                "comments": own_totals["comments"] + other_totals["comments"],
+                "shares": own_totals["shares"] + other_totals["shares"],
+            }
+
+            total = len(own) + len(others)
+            print(f"  [done] {total} videos ({len(own)} own, {len(others)} others)", file=sys.stderr)
+            print(f"  [stats] OUR NETWORK: {own_totals}", file=sys.stderr)
+            print(f"  [stats] OTHERS: {other_totals}", file=sys.stderr)
+            print(f"  [stats] COMBINED: {totals}", file=sys.stderr)
             print(f"{'='*60}\n", file=sys.stderr)
 
-            response = {"results": others, "own_posts": own, "total": len(final), "totals": totals}
+            response = {
+                "results": others,
+                "own_posts": own,
+                "total": total,
+                "totals": totals,
+                "own_totals": own_totals,
+                "other_totals": other_totals,
+            }
             cache_set(cache_id, response)
             self.reply(response)
 

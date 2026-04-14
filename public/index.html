@@ -694,10 +694,10 @@ textarea.in98{resize:vertical;min-height:40px}
       </div>
     </div>
 
-    <!-- IMPACT -->
+    <!-- COMBINED IMPACT -->
     <div class="impact-win" id="impact">
       <div class="win">
-        <div class="win-title"><span>📊 Impact Report - idiot_roundup_results.dat</span><div class="win-btns"><div class="win-btn">_</div><div class="win-btn">□</div><div class="win-btn">×</div></div></div>
+        <div class="win-title"><span>📊 Total Impact - idiot_roundup_results.dat</span><div class="win-btns"><div class="win-btn">_</div><div class="win-btn">□</div><div class="win-btn">×</div></div></div>
         <div class="win-body">
           <div class="impact-line">YOUR MOMENT REACHED <span id="iReach">0</span> PEOPLE ACROSS <span id="iVids">0</span> VIDEOS</div>
           <div class="impact-grid">
@@ -710,10 +710,26 @@ textarea.in98{resize:vertical;min-height:40px}
       </div>
     </div>
 
+    <!-- OUR NETWORK IMPACT -->
+    <div class="impact-win" id="ownImpact">
+      <div class="win">
+        <div class="win-title" style="background:linear-gradient(90deg,#cc3300,#ff6600)"><span>🔥 Our Network Impact - <span id="ownNetCt">0</span> accounts</span><div class="win-btns"><div class="win-btn">_</div><div class="win-btn">□</div><div class="win-btn">×</div></div></div>
+        <div class="win-body">
+          <div class="impact-line" style="color:#ff4400">OUR PAGES GENERATED <span id="ownReach">0</span> VIEWS FROM <span id="ownVidCt">0</span> POSTS</div>
+          <div class="impact-grid">
+            <div><div class="impact-val" id="oV">0</div><div class="impact-label">Our Posts</div></div>
+            <div><div class="impact-val" id="oP">0</div><div class="impact-label">Our Views</div></div>
+            <div><div class="impact-val" id="oL">0</div><div class="impact-label">Our Likes</div></div>
+            <div><div class="impact-val" id="oS">0</div><div class="impact-label">Our Shares</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- OWN POSTS RESULTS -->
     <div class="results-win" id="ownSec">
       <div class="win">
-        <div class="win-title"><span>📁 Your Posts - <span id="ownCt">0</span> found</span><div class="win-btns"><div class="win-btn">_</div><div class="win-btn">□</div><div class="win-btn">×</div></div></div>
+        <div class="win-title" style="background:linear-gradient(90deg,#cc3300,#ff6600)"><span>📁 Our Posts - <span id="ownCt">0</span></span><div class="win-btns"><div class="win-btn">_</div><div class="win-btn">□</div><div class="win-btn">×</div></div></div>
         <div class="win-body">
           <div class="inset" id="ownCards"></div>
         </div>
@@ -797,7 +813,7 @@ function addLog(txt,cls){
 function setBar(pct){$('progBar').style.width=pct+'%'}
 
 function reset(){
-  ['prog','impact','ownSec','resSec'].forEach(x=>$(x).classList.remove('vis'));
+  ['prog','impact','ownImpact','ownSec','resSec'].forEach(x=>$(x).classList.remove('vis'));
   $('err').classList.remove('vis');
   $('how').style.display='';
   $('statusText').textContent='Ready';
@@ -809,7 +825,7 @@ function switchMode(m){
   $('rpPanel').style.display=m==='repost'?'':'none';
   $('evPanel').classList.toggle('vis',m==='event');
   $('winPath').textContent=m==='repost'?'repost_finder.exe':'event_finder.exe';
-  ['prog','impact','ownSec','resSec'].forEach(x=>$(x).classList.remove('vis'));
+  ['prog','impact','ownImpact','ownSec','resSec'].forEach(x=>$(x).classList.remove('vis'));
   $('how').style.display='';
   $('statusText').textContent='Mode: '+(m==='repost'?'Repost Finder':'Event Finder');
 }
@@ -991,29 +1007,43 @@ async function doEvent(){
   addLog('Searching TikTok keywords...','active');setBar(5);
   $('progStatus').textContent='Searching keywords...';
 
-  const t1=setTimeout(()=>{addLog('Keywords scraped. Searching hashtags...','done');addLog('Scraping hashtag feeds...','active');setBar(25);$('progStatus').textContent='Scraping hashtags...'},6000);
-  const t2=setTimeout(()=>{addLog('Hashtags scraped. Filtering content...','done');addLog('Filtering irrelevant content...','active');setBar(50);$('progStatus').textContent='Filtering content...'},14000);
-  const t3=setTimeout(()=>{addLog('Content filtered. Starting AI vision scan...','done');addLog('AI scanning thumbnails for flame shirt...','active');setBar(75);$('progStatus').textContent='AI vision scan...'},22000);
+  const t1=setTimeout(()=>{addLog('Keywords scraped. Searching hashtags...','done');addLog('Scraping hashtag feeds...','active');setBar(15);$('progStatus').textContent='Scraping hashtags...'},6000);
+  const t2=setTimeout(()=>{addLog('Hashtags scraped. Filtering content...','done');addLog('Filtering irrelevant content...','active');setBar(30);$('progStatus').textContent='Filtering content...'},14000);
+  const t3=setTimeout(()=>{addLog('Content filtered. Starting AI vision scan...','done');addLog('AI scanning thumbnails...','active');setBar(45);$('progStatus').textContent='AI vision scan...'},22000);
+  const t4=setTimeout(()=>{addLog('Vision scan complete. Scraping our network...','done');addLog('Scraping 36 accounts for matching posts...','active');setBar(65);$('progStatus').textContent='Scraping our accounts...'},35000);
+  const t5=setTimeout(()=>{addLog('Account scrape in progress...','active');setBar(80);$('progStatus').textContent='Tallying stats...'},50000);
 
   try{
     const resp=await fetch('/api/event-search',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({event:name,venue:$('evVenue').value.trim(),date:$('evDate').value,timeframe:$('evTime').value.trim(),ref_video:$('evRef').value.trim(),description:desc,keywords:$('evKw').value.trim(),platforms:'tiktok, instagram'})});
-    [t1,t2,t3].forEach(clearTimeout);
+    [t1,t2,t3,t4,t5].forEach(clearTimeout);
     const data=await resp.json();if(data.error)throw new Error(data.error);
     const res=data.results||[],own=data.own_posts||[],totals=data.totals||{},total=res.length+own.length;
+    const ownTotals=data.own_totals||{};
+    const otherTotals=data.other_totals||{};
     setBar(100);
     addLog('=================================','done');
-    addLog('SCAN COMPLETE: '+total+' visual matches found.','done');
-    addLog('Total reach: '+fmt(totals.plays||0)+' views','done');
+    addLog('SCAN COMPLETE: '+total+' total matches found.','done');
+    addLog('OUR NETWORK: '+own.length+' posts, '+fmt(ownTotals.plays||0)+' views','done');
+    addLog('OTHER ANGLES: '+res.length+' posts, '+fmt(otherTotals.plays||0)+' views','done');
+    addLog('COMBINED REACH: '+fmt(totals.plays||0)+' views','done');
     $('progStatus').textContent='Complete - '+total+' matches found';
-    $('statusText').textContent=total+' matches found';
+    $('statusText').textContent=total+' matches ('+own.length+' ours, '+res.length+' others)';
 
+    // Combined impact
     $('iV').textContent=total;$('iP').textContent=fmt(totals.plays||0);$('iL').textContent=fmt(totals.likes||0);$('iS').textContent=fmt(totals.shares||0);
     $('iReach').textContent=fmt(totals.plays||0);$('iVids').textContent=total;$('impact').classList.add('vis');
 
-    if(own.length){$('ownSec').classList.add('vis');$('ownCt').textContent=own.length+' found';renderCards(own,'ownCards',true)}
+    // Our network impact
+    if(own.length){
+      $('ownImpact').classList.add('vis');
+      $('ownNetCt').textContent=(ownTotals.count||own.length);
+      $('oV').textContent=own.length;$('oP').textContent=fmt(ownTotals.plays||0);$('oL').textContent=fmt(ownTotals.likes||0);$('oS').textContent=fmt(ownTotals.shares||0);
+      $('ownReach').textContent=fmt(ownTotals.plays||0);$('ownVidCt').textContent=own.length;
+      $('ownSec').classList.add('vis');$('ownCt').textContent=own.length+' posts found';renderCards(own,'ownCards',true);
+    }
     $('resSec').classList.add('vis');$('resTitle').textContent='Other Angles';$('resCt').textContent=res.length+' match'+(res.length!==1?'es':'');renderCards(res,'resCards',false);
-  }catch(e){[t1,t2,t3].forEach(clearTimeout);showErr(e.message);addLog('ERROR: '+e.message,'err');$('progStatus').textContent='Failed'}
+  }catch(e){[t1,t2,t3,t4,t5].forEach(clearTimeout);showErr(e.message);addLog('ERROR: '+e.message,'err');$('progStatus').textContent='Failed'}
   finally{b.disabled=false;b.textContent='🔥 Find Every Angle'}
 }
 $('urlInput').addEventListener('keydown',e=>{if(e.key==='Enter')doRepost()});
