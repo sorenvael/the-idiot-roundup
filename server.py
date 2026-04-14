@@ -621,8 +621,70 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/api/search": self.handle_search()
+        elif self.path == "/api/load-ref": self.handle_load_ref()
         elif self.path == "/api/event-search": self.handle_event_search()
         else: self.send_error(404)
+
+    def handle_load_ref(self):
+        """Load reference video metadata: thumbnail, title, author, hashtags."""
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            url = body.get("url", "").strip()
+            if not url:
+                return self.reply({"error": "No URL provided"}, 400)
+
+            print(f"[load-ref] Loading: {url}", file=sys.stderr)
+            result = {"url": url, "title": "", "author": "", "thumbnail_url": "", "hashtags": []}
+
+            # Try oEmbed for TikTok
+            if "tiktok.com" in url:
+                try:
+                    r = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(url)}", headers=HEADERS, timeout=10)
+                    if r.ok:
+                        d = r.json()
+                        result["title"] = d.get("title", "")
+                        result["author"] = d.get("author_name", "")
+                        result["thumbnail_url"] = d.get("thumbnail_url", "")
+                        # Extract hashtags from title
+                        tags = re.findall(r'#(\w+)', result["title"])
+                        result["hashtags"] = tags
+                        print(f"  [load-ref] Title: {result['title'][:60]}", file=sys.stderr)
+                        print(f"  [load-ref] Author: {result['author']}", file=sys.stderr)
+                        print(f"  [load-ref] Hashtags: {tags}", file=sys.stderr)
+                        print(f"  [load-ref] Thumbnail: {bool(result['thumbnail_url'])}", file=sys.stderr)
+                except Exception as e:
+                    print(f"  [load-ref] oEmbed failed: {e}", file=sys.stderr)
+
+            elif "instagram.com" in url:
+                try:
+                    r = requests.get(f"https://api.instagram.com/oembed/?url={quote_plus(url)}", headers=HEADERS, timeout=10)
+                    if r.ok:
+                        d = r.json()
+                        result["title"] = d.get("title", "")
+                        result["author"] = d.get("author_name", "")
+                        result["thumbnail_url"] = d.get("thumbnail_url", "")
+                        tags = re.findall(r'#(\w+)', result["title"])
+                        result["hashtags"] = tags
+                except Exception as e:
+                    print(f"  [load-ref] Instagram oEmbed failed: {e}", file=sys.stderr)
+
+            elif "youtube.com" in url or "youtu.be" in url:
+                try:
+                    r = requests.get(f"https://www.youtube.com/oembed?url={quote_plus(url)}&format=json", headers=HEADERS, timeout=10)
+                    if r.ok:
+                        d = r.json()
+                        result["title"] = d.get("title", "")
+                        result["author"] = d.get("author_name", "")
+                        vid = re.search(r'(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})', url)
+                        if vid:
+                            result["thumbnail_url"] = f"https://img.youtube.com/vi/{vid.group(1)}/hqdefault.jpg"
+                except Exception as e:
+                    print(f"  [load-ref] YouTube oEmbed failed: {e}", file=sys.stderr)
+
+            self.reply(result)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.reply({"error": str(e)}, 500)
 
     def handle_search(self):
         try:
@@ -646,48 +708,91 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             print(f"\n{'='*60}", file=sys.stderr)
-            print(f"[event-search] {body.get('event', '?')}", file=sys.stderr)
 
             cache_id = hashlib.md5(json.dumps(body, sort_keys=True).encode()).hexdigest()
             cached = cache_get(cache_id)
             if cached: return self.reply(cached)
 
-            event = body.get('event', '').strip()
+            ref_url = body.get('ref_video', '').strip()
             venue = body.get('venue', '').strip()
             date = body.get('date', '').strip()
-            description = body.get('description', '').strip()
-            keywords_str = body.get('keywords', '').strip()
-            ref_video = body.get('ref_video', '').strip()
+            ref_data = body.get('ref_data') or {}  # pre-loaded metadata from /api/load-ref
 
-            seen_urls = set()
+            if not ref_url:
+                return self.reply({"error": "Reference video URL is required"}, 400)
+
+            print(f"[event-search] Ref: {ref_url[:60]}", file=sys.stderr)
+            print(f"[event-search] Venue: {venue}, Date: {date}", file=sys.stderr)
+
+            # ══════════════════════════════════════════════════════
+            # STEP 1: Get reference video metadata (if not pre-loaded)
+            # ══════════════════════════════════════════════════════
+            ref_title = ref_data.get('title', '')
+            ref_author = ref_data.get('author', '')
+            ref_thumbnail = ref_data.get('thumbnail_url', '')
+            ref_hashtags = ref_data.get('hashtags', [])
+
+            if not ref_title and "tiktok.com" in ref_url:
+                try:
+                    r = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(ref_url)}", headers=HEADERS, timeout=10)
+                    if r.ok:
+                        d = r.json()
+                        ref_title = d.get("title", "")
+                        ref_author = d.get("author_name", "")
+                        ref_thumbnail = d.get("thumbnail_url", "")
+                        ref_hashtags = re.findall(r'#(\w+)', ref_title)
+                except Exception as e:
+                    print(f"  [step1] oEmbed failed: {e}", file=sys.stderr)
+
+            print(f"  [ref] Title: {ref_title[:80]}", file=sys.stderr)
+            print(f"  [ref] Author: {ref_author}", file=sys.stderr)
+            print(f"  [ref] Hashtags: {ref_hashtags}", file=sys.stderr)
+            print(f"  [ref] Thumbnail: {bool(ref_thumbnail)}", file=sys.stderr)
+
+            # Download reference thumbnail for vision comparison
+            ref_b64 = None
+            if ref_thumbnail:
+                ref_b64 = download_thumbnail(ref_thumbnail)
+                print(f"  [ref] Thumbnail downloaded: {bool(ref_b64)}", file=sys.stderr)
+
+            seen_urls = {ref_url}  # don't include the reference video itself
             all_results = []
 
             # ══════════════════════════════════════════════════════
-            # STEP 1: Use Anthropic web search to find ACTUAL URLs
-            # This is the primary discovery method now — no more
-            # relying on Apify keyword search which returns random trending stuff
+            # STEP 2: Anthropic web search using ref video info
             # ══════════════════════════════════════════════════════
-            print(f"  [step1] Anthropic web search for specific URLs...", file=sys.stderr)
+            print(f"  [step2] AI web search for matching videos...", file=sys.stderr)
             if API_KEY:
-                search_prompt = f"""Find TikTok and Instagram videos from this SPECIFIC event:
+                # Build search terms from the reference video
+                search_terms = []
+                if ref_hashtags:
+                    search_terms.append(' '.join(f'#{t}' for t in ref_hashtags))
+                if ref_title:
+                    # Use key words from title (not hashtags)
+                    title_words = re.sub(r'#\w+', '', ref_title).strip()
+                    if title_words:
+                        search_terms.append(title_words[:100])
+                if venue:
+                    search_terms.append(venue.split(',')[0].strip())
 
-EVENT: {event}
+                search_prompt = f"""Find TikTok, Instagram, and YouTube videos of the SAME moment shown in this reference video:
+
+REFERENCE VIDEO: {ref_url}
+TITLE: {ref_title}
+AUTHOR: @{ref_author}
+HASHTAGS: {' '.join('#'+t for t in ref_hashtags)}
 VENUE: {venue}
 DATE: {date}
-WHAT HAPPENED: {description}
-KEYWORDS: {keywords_str}
-REFERENCE VIDEO: {ref_video}
 
-CRITICAL: ONLY return results from {venue} on {date}. Do NOT include videos from other shows, cities, or dates.
+I need OTHER videos of this same event/moment from different angles and accounts.
+Search for:
+- site:tiktok.com {' '.join(search_terms)}
+- "{ref_title[:50]}" tiktok
+- {' '.join('#'+t for t in ref_hashtags[:3])} {venue.split(',')[0].strip() if venue else ''}
 
-Search TikTok, Instagram, YouTube, Twitter/X, and news sites for:
-- "baker mayfield zach bryan tampa"
-- "zach bryan raymond james stadium"
-- "zach bryan revival tampa"
-- site:tiktok.com {keywords_str} {venue.split(',')[0] if venue else ''}
-
-Find at least 20-30 specific video URLs. Include the EXACT TikTok/Instagram URLs.
-Return ONLY a JSON array. Each object: platform, account_name, url, description, confidence (high/medium), date_found."""
+ONLY return results from {venue or 'this same event'}{f' on {date}' if date else ''}. REJECT videos from other events/cities.
+Find 20-40 specific video URLs. Return ONLY a JSON array.
+Each object: platform, account_name, url, description, confidence (high/medium), date_found."""
 
                 try:
                     r = requests.post(
@@ -696,7 +801,7 @@ Return ONLY a JSON array. Each object: platform, account_name, url, description,
                         json={
                             "model": "claude-sonnet-4-20250514",
                             "max_tokens": 8192,
-                            "system": f"You find videos of ONE SPECIFIC event at ONE SPECIFIC venue. ONLY return results from {venue} on {date}. REJECT results from other cities/dates. Return ONLY a JSON array.",
+                            "system": f"You find videos of the SAME event/moment as a reference video. ONLY return results from {venue or 'this specific event'}. REJECT results from other cities/dates. Return ONLY a JSON array.",
                             "tools": [{"type": "web_search_20250305", "name": "web_search"}],
                             "messages": [{"role": "user", "content": search_prompt}]
                         },
@@ -707,65 +812,48 @@ Return ONLY a JSON array. Each object: platform, account_name, url, description,
                     cleaned = re.sub(r"```json|```", "", text).strip()
                     match = re.search(r"\[[\s\S]*\]", cleaned)
                     if match:
-                        try:
-                            web_results = json.loads(match.group(0))
-                            for wr in web_results:
-                                url = wr.get("url", "")
-                                if url and url not in seen_urls:
-                                    seen_urls.add(url)
-                                    # Try to get real stats via oEmbed
-                                    platform = wr.get("platform", "other")
-                                    stats = {}
-                                    thumbnail = ""
-                                    if "tiktok.com" in url:
-                                        platform = "tiktok"
-                                        try:
-                                            oembed = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(url)}", headers=HEADERS, timeout=8)
-                                            if oembed.ok:
-                                                od = oembed.json()
-                                                thumbnail = od.get("thumbnail_url", "")
-                                                if not wr.get("account_name"):
-                                                    wr["account_name"] = "@" + od.get("author_name", "unknown")
-                                                if not wr.get("description"):
-                                                    wr["description"] = od.get("title", "")
-                                        except Exception:
-                                            pass
-                                    elif "instagram.com" in url:
-                                        platform = "instagram"
-                                    elif "youtube.com" in url or "youtu.be" in url:
-                                        platform = "youtube"
+                        web_results = json.loads(match.group(0))
+                        for wr in web_results:
+                            url = wr.get("url", "")
+                            if url and url not in seen_urls:
+                                seen_urls.add(url)
+                                platform = wr.get("platform", "other")
+                                thumbnail = ""
+                                if "tiktok.com" in url:
+                                    platform = "tiktok"
+                                    try:
+                                        oembed = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(url)}", headers=HEADERS, timeout=8)
+                                        if oembed.ok:
+                                            od = oembed.json()
+                                            thumbnail = od.get("thumbnail_url", "")
+                                            if not wr.get("account_name"):
+                                                wr["account_name"] = "@" + od.get("author_name", "unknown")
+                                            if not wr.get("description"):
+                                                wr["description"] = od.get("title", "")
+                                    except Exception:
+                                        pass
+                                elif "instagram.com" in url: platform = "instagram"
+                                elif "youtube.com" in url or "youtu.be" in url: platform = "youtube"
 
-                                    all_results.append({
-                                        "platform": platform,
-                                        "account_name": wr.get("account_name", "@unknown"),
-                                        "url": url,
-                                        "description": wr.get("description", ""),
-                                        "confidence": wr.get("confidence", "medium"),
-                                        "thumbnail": thumbnail,
-                                        "stats": stats,
-                                        "vision_match": "YES",  # Claude already verified relevance
-                                    })
-                            print(f"  [step1] Found {len(all_results)} URLs via web search", file=sys.stderr)
-                        except json.JSONDecodeError as e:
-                            print(f"  [step1] JSON parse error: {e}", file=sys.stderr)
+                                all_results.append({
+                                    "platform": platform,
+                                    "account_name": wr.get("account_name", "@unknown"),
+                                    "url": url,
+                                    "description": wr.get("description", ""),
+                                    "thumbnail": thumbnail,
+                                    "stats": {},
+                                    "vision_match": "YES",
+                                })
+                        print(f"  [step2] Found {len(all_results)} URLs via web search", file=sys.stderr)
                 except Exception as e:
-                    print(f"  [step1] Web search error: {e}", file=sys.stderr)
+                    print(f"  [step2] Web search error: {e}", file=sys.stderr)
 
             # ══════════════════════════════════════════════════════
-            # STEP 2: Search the EXACT hashtags the user provided
-            # These are the real hashtags people used, not guesses
+            # STEP 3: Search EXACT hashtags from the reference video
             # ══════════════════════════════════════════════════════
-            hashtags_from_keywords = []
-            for kw in keywords_str.split(','):
-                kw = kw.strip().lstrip('#').strip()
-                if kw:
-                    tag = re.sub(r'[^a-zA-Z0-9]', '', kw).lower()
-                    if tag and tag not in hashtags_from_keywords:
-                        hashtags_from_keywords.append(tag)
-
-            if APIFY_TOKEN and hashtags_from_keywords:
-                print(f"  [step2] Searching {len(hashtags_from_keywords)} exact hashtags: {hashtags_from_keywords}", file=sys.stderr)
-                for tag in hashtags_from_keywords:
+            if APIFY_TOKEN and ref_hashtags:
+                print(f"  [step3] Searching {len(ref_hashtags)} hashtags from ref video: {ref_hashtags}", file=sys.stderr)
+                for tag in ref_hashtags:
                     try:
                         items = run_apify_actor("clockworks~tiktok-hashtag-scraper",
                             {"hashtags": [tag], "resultsPerPage": 30,
@@ -778,28 +866,54 @@ Return ONLY a JSON array. Each object: platform, account_name, url, description,
                             if p:
                                 all_results.append(p)
                                 added += 1
-                        print(f"  [step2] #{tag}: {added} new results", file=sys.stderr)
+                        print(f"  [step3] #{tag}: {added} new results", file=sys.stderr)
                     except Exception as e:
-                        print(f"  [step2] #{tag} failed: {e}", file=sys.stderr)
-                print(f"  [step2] Total after hashtags: {len(all_results)}", file=sys.stderr)
+                        print(f"  [step3] #{tag} failed: {e}", file=sys.stderr)
 
             # ══════════════════════════════════════════════════════
-            # STEP 3: Scrape our own accounts for matching posts
+            # STEP 4: Vision match — compare thumbnails to reference
+            # Uses BOTH thumbnail visual similarity AND description matching
+            # ══════════════════════════════════════════════════════
+            if ref_b64 and API_KEY and all_results:
+                print(f"  [step4] Vision matching {len(all_results)} results against reference...", file=sys.stderr)
+                vision_prompt = f"""I'm showing you two images. The FIRST is a reference video thumbnail. The SECOND is a candidate video thumbnail.
+
+Do these appear to be from the SAME event or moment? Consider:
+- Same venue/stage/setting
+- Same performers or people
+- Similar lighting, crowd, angle
+- Related to: {ref_title[:100]}
+
+Respond with exactly one word: YES, MAYBE, or NO."""
+
+                matched = vision_filter_results(all_results, vision_prompt=vision_prompt)
+                print(f"  [step4] {len(matched)} passed vision check", file=sys.stderr)
+            else:
+                matched = all_results
+                print(f"  [step4] Skipped vision (no ref thumbnail), keeping all {len(matched)}", file=sys.stderr)
+
+            # ══════════════════════════════════════════════════════
+            # STEP 5: Scrape our own accounts for matching posts
             # ══════════════════════════════════════════════════════
             if APIFY_TOKEN:
-                print(f"  [step3] Scraping {len(DEFAULT_OWN_ACCOUNTS)} own accounts...", file=sys.stderr)
-                own_scraped = scrape_own_accounts(body)
-                # Add to results, deduplicating
+                # Build match terms from ref video
+                match_body = {
+                    'event': ref_title,
+                    'keywords': ','.join(ref_hashtags),
+                    'description': ref_title,
+                }
+                print(f"  [step5] Scraping {len(DEFAULT_OWN_ACCOUNTS)} own accounts...", file=sys.stderr)
+                own_scraped = scrape_own_accounts(match_body)
                 for r in own_scraped:
                     if r["url"] not in seen_urls:
                         seen_urls.add(r["url"])
-                        all_results.append(r)
-                print(f"  [step3] {len(own_scraped)} from own accounts, total: {len(all_results)}", file=sys.stderr)
+                        matched.append(r)
+                print(f"  [step5] {len(own_scraped)} from own accounts", file=sys.stderr)
 
             # ══════════════════════════════════════════════════════
-            # STEP 4: Split own vs others, tally stats
+            # STEP 6: Split own vs others, tally stats
             # ══════════════════════════════════════════════════════
-            own, others = split_results(all_results, DEFAULT_OWN_ACCOUNTS)
+            own, others = split_results(matched, DEFAULT_OWN_ACCOUNTS)
 
             own_totals = {"plays": 0, "likes": 0, "comments": 0, "shares": 0, "count": len(own)}
             for r in own:

@@ -642,21 +642,26 @@ textarea.in98{resize:vertical;min-height:40px}
           </div>
         </div>
 
-        <!-- EVENT PANEL -->
+        <!-- EVENT PANEL (simplified: reference video is the source of truth) -->
         <div class="ev-panel" id="evPanel">
+          <div class="field"><label class="lbl98">Reference Video URL:</label><input class="in98" type="text" id="evRef" placeholder="https://www.tiktok.com/@user/video/... (paste your video, app does the rest)"/></div>
           <div class="field-row">
-            <div class="field"><label class="lbl98">Event / Concert:</label><input class="in98" type="text" id="evName" placeholder="e.g. Zach Bryan concert"/></div>
-            <div class="field"><label class="lbl98">Venue & City:</label><input class="in98" type="text" id="evVenue" placeholder="e.g. Alamodome, San Antonio TX"/></div>
-          </div>
-          <div class="field-row">
+            <div class="field"><label class="lbl98">Venue & City:</label><input class="in98" type="text" id="evVenue" placeholder="e.g. Raymond James Stadium, Tampa FL"/></div>
             <div class="field"><label class="lbl98">Date:</label><input class="in98" type="date" id="evDate"/></div>
-            <div class="field"><label class="lbl98">Timeframe:</label><input class="in98" type="text" id="evTime" value="last 30 days"/></div>
           </div>
-          <div class="field"><label class="lbl98">Reference video URL:</label><input class="in98" type="text" id="evRef" placeholder="https://www.tiktok.com/@user/video/..."/></div>
-          <div class="field"><label class="lbl98">Describe the moment:</label><textarea class="in98" id="evDesc" placeholder="e.g. Fan in flame shirt came on stage during 'Revival', danced with LED gloves"></textarea></div>
-          <div class="field"><label class="lbl98">Hashtags (comma separated, from the actual posts):</label><input class="in98" type="text" id="evKw" placeholder="e.g. #zachbryan, #revival, #tampa, #florida, #bakermayfield"/></div>
+          <div id="evPreview" style="display:none;margin-bottom:6px">
+            <div class="inset-dark" style="display:flex;gap:8px;align-items:center;padding:6px">
+              <img id="evThumb" style="width:60px;height:80px;object-fit:cover;border:1px solid #0f0" />
+              <div>
+                <div style="color:#0f0;font-size:11px;font-weight:700" id="evPrevAcct">@account</div>
+                <div style="color:#0f0;font-size:10px;margin-top:2px" id="evPrevDesc">Description loading...</div>
+                <div style="color:#ff0;font-size:9px;margin-top:4px" id="evPrevTags">Hashtags: ...</div>
+              </div>
+            </div>
+          </div>
           <div class="btn-row">
             <button class="btn98" onclick="reset()">Clear</button>
+            <button class="btn98" id="evLoadBtn" onclick="loadRefVideo()">📡 Load Video</button>
             <button class="btn98 btn98-fire" id="evBtn" onclick="doEvent()">🔥 Find Every Angle</button>
           </div>
         </div>
@@ -995,46 +1000,69 @@ async function doRepost(){
   finally{b.disabled=false;b.textContent='🔥 Round \'em Up'}
 }
 
+// ── Reference video state ──
+let refVideoData=null;
+
+async function loadRefVideo(){
+  const url=$('evRef').value.trim();
+  if(!url)return showErr('Paste a video URL first.');
+  const btn=$('evLoadBtn');btn.disabled=true;btn.textContent='⏳ Loading...';
+  $('statusText').textContent='Loading reference video...';
+  try{
+    const resp=await fetch('/api/load-ref',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+    const data=await resp.json();if(data.error)throw new Error(data.error);
+    refVideoData=data;
+    // Show preview
+    $('evPreview').style.display='block';
+    if(data.thumbnail_url)$('evThumb').src=data.thumbnail_url;
+    $('evPrevAcct').textContent=data.author?'@'+data.author:'@unknown';
+    $('evPrevDesc').textContent=(data.title||'No description').slice(0,100);
+    $('evPrevTags').textContent='Hashtags: '+(data.hashtags||[]).map(t=>'#'+t).join(' ');
+    $('statusText').textContent='Reference loaded — ready to scan';
+  }catch(e){showErr('Could not load video: '+e.message)}
+  finally{btn.disabled=false;btn.textContent='📡 Load Video'}
+}
+
 async function doEvent(){
-  const name=$('evName').value.trim(),desc=$('evDesc').value.trim();
-  if(!name||!desc)return showErr('Fill in event name and description.');
+  const refUrl=$('evRef').value.trim();
+  if(!refUrl)return showErr('Paste a reference video URL first.');
+  const venue=$('evVenue').value.trim();
+  const date=$('evDate').value;
+
   const b=$('evBtn');b.disabled=true;b.textContent='⏳ Scanning...';
   reset();
   $('prog').classList.add('vis');$('how').style.display='none';
   $('progLog').innerHTML='';
-  $('statusText').textContent='Scanning event...';
-  addLog('roundup_scan.exe --mode=event --query="'+name+'"');
-  addLog('Searching TikTok keywords...','active');setBar(5);
-  $('progStatus').textContent='Searching keywords...';
+  $('statusText').textContent='Scanning...';
+  addLog('roundup_scan.exe --mode=event --ref="'+refUrl.slice(0,50)+'..."');
+  addLog('Loading reference video metadata...','active');setBar(5);
+  $('progStatus').textContent='Loading reference...';
 
-  const t1=setTimeout(()=>{addLog('Keywords scraped. Searching hashtags...','done');addLog('Scraping hashtag feeds...','active');setBar(15);$('progStatus').textContent='Scraping hashtags...'},6000);
-  const t2=setTimeout(()=>{addLog('Hashtags scraped. Filtering content...','done');addLog('Filtering irrelevant content...','active');setBar(30);$('progStatus').textContent='Filtering content...'},14000);
-  const t3=setTimeout(()=>{addLog('Content filtered. Starting AI vision scan...','done');addLog('AI scanning thumbnails...','active');setBar(45);$('progStatus').textContent='AI vision scan...'},22000);
-  const t4=setTimeout(()=>{addLog('Vision scan complete. Scraping our network...','done');addLog('Scraping 36 accounts for matching posts...','active');setBar(65);$('progStatus').textContent='Scraping our accounts...'},35000);
-  const t5=setTimeout(()=>{addLog('Account scrape in progress...','active');setBar(80);$('progStatus').textContent='Tallying stats...'},50000);
+  const t1=setTimeout(()=>{addLog('Reference loaded. Searching web for matching videos...','done');addLog('AI web search in progress...','active');setBar(20);$('progStatus').textContent='AI searching web...'},5000);
+  const t2=setTimeout(()=>{addLog('Web search complete. Searching hashtags on TikTok...','done');addLog('Scraping hashtag feeds...','active');setBar(40);$('progStatus').textContent='Searching hashtags...'},15000);
+  const t3=setTimeout(()=>{addLog('Hashtags scraped. Vision matching thumbnails...','done');addLog('Comparing thumbnails to reference...','active');setBar(60);$('progStatus').textContent='Vision matching...'},30000);
+  const t4=setTimeout(()=>{addLog('Vision match done. Scraping our accounts...','done');addLog('Scanning 36 accounts...','active');setBar(75);$('progStatus').textContent='Scraping our network...'},45000);
+  const t5=setTimeout(()=>{addLog('Almost done. Tallying stats...','active');setBar(90);$('progStatus').textContent='Tallying stats...'},60000);
 
   try{
     const resp=await fetch('/api/event-search',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({event:name,venue:$('evVenue').value.trim(),date:$('evDate').value,timeframe:$('evTime').value.trim(),ref_video:$('evRef').value.trim(),description:desc,keywords:$('evKw').value.trim(),platforms:'tiktok, instagram'})});
+      body:JSON.stringify({ref_video:refUrl,venue,date,ref_data:refVideoData||null})});
     [t1,t2,t3,t4,t5].forEach(clearTimeout);
     const data=await resp.json();if(data.error)throw new Error(data.error);
     const res=data.results||[],own=data.own_posts||[],totals=data.totals||{},total=res.length+own.length;
     const ownTotals=data.own_totals||{};
-    const otherTotals=data.other_totals||{};
     setBar(100);
     addLog('=================================','done');
     addLog('SCAN COMPLETE: '+total+' total matches found.','done');
     addLog('OUR NETWORK: '+own.length+' posts, '+fmt(ownTotals.plays||0)+' views','done');
-    addLog('OTHER ANGLES: '+res.length+' posts, '+fmt(otherTotals.plays||0)+' views','done');
+    addLog('OTHER ANGLES: '+res.length+' posts','done');
     addLog('COMBINED REACH: '+fmt(totals.plays||0)+' views','done');
     $('progStatus').textContent='Complete - '+total+' matches found';
     $('statusText').textContent=total+' matches ('+own.length+' ours, '+res.length+' others)';
 
-    // Combined impact
     $('iV').textContent=total;$('iP').textContent=fmt(totals.plays||0);$('iL').textContent=fmt(totals.likes||0);$('iS').textContent=fmt(totals.shares||0);
     $('iReach').textContent=fmt(totals.plays||0);$('iVids').textContent=total;$('impact').classList.add('vis');
 
-    // Our network impact
     if(own.length){
       $('ownImpact').classList.add('vis');
       $('ownNetCt').textContent=(ownTotals.count||own.length);
