@@ -322,10 +322,8 @@ def vision_filter_results(results, max_concurrent=5, vision_prompt=None):
 
 # ── Search queries & filter ──────────────────────────────────
 
-EXCLUDE_KEYWORDS = {"tampa", "florida", "raymond james", "harley davidson",
-                     "harley bike", "motorcycle", "hockey", "nhl", "nfl", "nba",
-                     "wedding", "shane gillis"}
-MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
+# ── No more hardcoded exclude keywords — filtering is fully dynamic now ──
+MAX_AGE_SECONDS = 60 * 24 * 60 * 60  # 60 days
 
 
 # ── Scrape our own accounts for matching posts ─────────────
@@ -420,12 +418,10 @@ def scrape_own_accounts(event_info, max_concurrent=5):
     return all_own_posts
 
 def filter_results(results):
+    """Filter only by age — no more hardcoded keyword exclusions."""
     now = time.time()
     out = []
     for r in results:
-        desc = (r.get("description") or "").lower()
-        if any(excl in desc for excl in EXCLUDE_KEYWORDS):
-            continue
         ct = r.get("createTime")
         if ct:
             try:
