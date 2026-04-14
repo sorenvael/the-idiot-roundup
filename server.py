@@ -536,29 +536,54 @@ def build_hashtags(event_info):
     return hashtags
 
 
-# ── Relevance filter: reject results that don't match the event ──
+# ── Relevance filter: reject results from the WRONG show ──
 def relevance_filter(results, event_info):
-    """Filter results to only keep ones that actually relate to the specified event/venue."""
+    """Smart filter: if a venue is specified, results MUST match a location term.
+    Generic terms like 'revival' or 'zach bryan' alone are NOT enough — those match every show."""
     venue = event_info.get('venue', '').lower().strip()
     keywords_str = event_info.get('keywords', '')
     description = event_info.get('description', '').lower().strip()
     keywords = [k.strip().lower() for k in keywords_str.split(',') if k.strip()]
 
-    # Build relevance terms from venue, keywords, and description
-    relevance_terms = set()
+    # ── Separate location terms from generic content terms ──
+    location_terms = set()
     if venue:
         for w in venue.replace(',', ' ').split():
-            if len(w) > 3:
-                relevance_terms.add(w.lower())
+            w = w.lower().strip()
+            if len(w) > 2:
+                location_terms.add(w)
+
+    # Also pull location-like keywords (city names, venue names)
+    # Anything that's NOT a common music/artist term is treated as location-specific
+    generic_terms = {"zach", "bryan", "concert", "show", "tour", "live", "revival",
+                     "stage", "crowd", "fan", "fans", "sing", "singing", "song",
+                     "music", "country", "performance", "video", "tiktok", "viral"}
+
+    # Unique content terms = keywords that are specific to THIS moment (not generic)
+    moment_terms = set()
     for kw in keywords:
         for w in kw.split():
-            if len(w) > 3:
-                relevance_terms.add(w.lower())
+            w = w.lower().strip()
+            if len(w) > 2 and w not in generic_terms:
+                # Check if it looks like a location term
+                if w in location_terms:
+                    continue  # already in location
+                moment_terms.add(w)
 
-    if not relevance_terms:
-        return results  # can't filter without terms
+    # Also get moment-specific terms from description
+    for w in description.split():
+        w = w.lower().strip()
+        if len(w) > 3 and w not in generic_terms:
+            moment_terms.add(w)
 
-    print(f"  [relevance] Filtering with terms: {relevance_terms}", file=sys.stderr)
+    has_venue = bool(location_terms)
+
+    print(f"  [relevance] Location terms (REQUIRED if venue set): {location_terms}", file=sys.stderr)
+    print(f"  [relevance] Moment terms (bonus): {moment_terms}", file=sys.stderr)
+    print(f"  [relevance] Venue specified: {has_venue}", file=sys.stderr)
+
+    if not location_terms and not moment_terms:
+        return results
 
     kept = []
     dropped = 0
@@ -568,13 +593,23 @@ def relevance_filter(results, event_info):
         acct = (r.get("account_name") or "").lower()
         combined = f"{desc} {url} {acct}"
 
-        # Keep if ANY relevance term matches
-        if any(term in combined for term in relevance_terms):
-            kept.append(r)
-        else:
-            dropped += 1
+        has_location_match = any(t in combined for t in location_terms)
+        moment_matches = sum(1 for t in moment_terms if t in combined)
 
-    print(f"  [relevance] Kept {len(kept)}, dropped {dropped} irrelevant results", file=sys.stderr)
+        if has_venue:
+            # STRICT: must have a location match, OR 2+ moment term matches
+            if has_location_match or moment_matches >= 2:
+                kept.append(r)
+            else:
+                dropped += 1
+        else:
+            # No venue specified — more lenient, any moment term works
+            if moment_matches >= 1:
+                kept.append(r)
+            else:
+                dropped += 1
+
+    print(f"  [relevance] Kept {len(kept)}, dropped {dropped} wrong-show results", file=sys.stderr)
     return kept
 
 
