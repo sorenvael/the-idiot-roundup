@@ -636,6 +636,10 @@ textarea.in98{resize:vertical;min-height:40px}
             <label class="lbl98">Video URL:</label>
             <input class="in98" type="text" id="urlInput" placeholder="https://www.tiktok.com/@user/video/123456..."/>
           </div>
+          <div class="field">
+            <label class="lbl98">Your accounts (comma separated):</label>
+            <input class="in98" type="text" id="rpOwn" placeholder="e.g. @greatamericanbarscene, @harleycarmichael" value="@greatamericanbarscene, @oklahomanoutlaw, @zachbryanarchive, @harleycarmichael"/>
+          </div>
           <div class="btn-row">
             <button class="btn98" onclick="reset()">Clear</button>
             <button class="btn98 btn98-fire" id="rpBtn" onclick="doRepost()">🔥 Round 'em Up</button>
@@ -865,9 +869,33 @@ function markBad(url,cardEl){
 
 function isKnownBad(url){return feedbackMemory.bad.has(url)}
 
-function mkCard(r,own){
+// ── Client-side own account detection ──
+function getOwnAccounts(){
+  // Merge from both panels (repost + event) + defaults
+  const defaults=['greatamericanbarscene','oklahomanoutlaw','zachbryanarchive','harleycarmichael'];
+  const rpVal=($('rpOwn')||{}).value||'';
+  const evVal=($('evOwn')||{}).value||'';
+  const all=(rpVal+','+evVal).split(',').map(a=>a.trim().replace(/^@/,'').toLowerCase()).filter(Boolean);
+  return new Set([...defaults,...all]);
+}
+
+function isOwnAccount(r){
+  const own=getOwnAccounts();
+  const name=(r.account_name||'').replace(/^@/,'').toLowerCase();
+  const url=(r.url||'').toLowerCase();
+  for(const acct of own){
+    if(!acct) continue;
+    if(name.includes(acct)||url.includes('/@'+acct)||url.includes('/'+acct)) return true;
+  }
+  return false;
+}
+
+function mkCard(r,ownOverride){
   // Skip results the user previously marked bad
   if(isKnownBad(r.url)) return null;
+
+  // Detect own account client-side (works for both modes)
+  const own=ownOverride||isOwnAccount(r);
 
   const card=document.createElement('div');
   card.className='vcard';
