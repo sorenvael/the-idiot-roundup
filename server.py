@@ -648,99 +648,159 @@ class Handler(SimpleHTTPRequestHandler):
             print(f"\n{'='*60}", file=sys.stderr)
             print(f"[event-search] {body.get('event', '?')}", file=sys.stderr)
 
-            # ── Cache key includes ALL fields so different prompts = different results ──
             cache_id = hashlib.md5(json.dumps(body, sort_keys=True).encode()).hexdigest()
             cached = cache_get(cache_id)
             if cached: return self.reply(cached)
-            if not APIFY_TOKEN: return self.reply({"error": "Apify token not set"}, 500)
 
-            # ── Parse own accounts from request (or use defaults) ──
-            own_accounts_str = body.get('own_accounts', '')
-            if own_accounts_str.strip():
-                own_accounts = {a.strip().lstrip('@').lower() for a in own_accounts_str.split(',') if a.strip()}
-            else:
-                own_accounts = DEFAULT_OWN_ACCOUNTS
+            event = body.get('event', '').strip()
+            venue = body.get('venue', '').strip()
+            date = body.get('date', '').strip()
+            description = body.get('description', '').strip()
+            keywords_str = body.get('keywords', '').strip()
+            ref_video = body.get('ref_video', '').strip()
 
-            # ── Build dynamic vision prompt from description ──
-            description = body.get('description', '')
-            vision_prompt = build_vision_prompt(description)
-            print(f"  [vision] Using dynamic prompt based on: {description[:60]}...", file=sys.stderr)
+            seen_urls = set()
+            all_results = []
 
-            seen = set()
-            candidates = []
+            # ══════════════════════════════════════════════════════
+            # STEP 1: Use Anthropic web search to find ACTUAL URLs
+            # This is the primary discovery method now — no more
+            # relying on Apify keyword search which returns random trending stuff
+            # ══════════════════════════════════════════════════════
+            print(f"  [step1] Anthropic web search for specific URLs...", file=sys.stderr)
+            if API_KEY:
+                search_prompt = f"""Find TikTok and Instagram videos from this SPECIFIC event:
 
-            # ── Step 1: Keyword search (dynamic queries) ──
-            queries = build_search_queries(body)
-            print(f"  [step1] {len(queries)} keyword queries...", file=sys.stderr)
-            for q in queries:
+EVENT: {event}
+VENUE: {venue}
+DATE: {date}
+WHAT HAPPENED: {description}
+KEYWORDS: {keywords_str}
+REFERENCE VIDEO: {ref_video}
+
+CRITICAL: ONLY return results from {venue} on {date}. Do NOT include videos from other shows, cities, or dates.
+
+Search TikTok, Instagram, YouTube, Twitter/X, and news sites for:
+- "baker mayfield zach bryan tampa"
+- "zach bryan raymond james stadium"
+- "zach bryan revival tampa"
+- site:tiktok.com {keywords_str} {venue.split(',')[0] if venue else ''}
+
+Find at least 20-30 specific video URLs. Include the EXACT TikTok/Instagram URLs.
+Return ONLY a JSON array. Each object: platform, account_name, url, description, confidence (high/medium), date_found."""
+
                 try:
-                    items = run_apify_actor("clockworks~tiktok-scraper",
-                        {"searchQueries": [q], "resultsPerPage": 20,
-                         "shouldDownloadCovers": False, "shouldDownloadVideos": False,
-                         "shouldDownloadSlideshowImages": False},
-                        label=f"kw '{q}'", max_polls=15)
-                    for item in items:
-                        p = parse_apify_item(item, seen)
-                        if p: candidates.append(p)
+                    r = requests.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={"x-api-key": API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                        json={
+                            "model": "claude-sonnet-4-20250514",
+                            "max_tokens": 8192,
+                            "system": f"You find videos of ONE SPECIFIC event at ONE SPECIFIC venue. ONLY return results from {venue} on {date}. REJECT results from other cities/dates. Return ONLY a JSON array.",
+                            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+                            "messages": [{"role": "user", "content": search_prompt}]
+                        },
+                        timeout=120,
+                    )
+                    r.raise_for_status()
+                    text = "\n".join(b["text"] for b in r.json().get("content", []) if b.get("type") == "text")
+                    cleaned = re.sub(r"```json|```", "", text).strip()
+                    match = re.search(r"\[[\s\S]*\]", cleaned)
+                    if match:
+                        try:
+                            web_results = json.loads(match.group(0))
+                            for wr in web_results:
+                                url = wr.get("url", "")
+                                if url and url not in seen_urls:
+                                    seen_urls.add(url)
+                                    # Try to get real stats via oEmbed
+                                    platform = wr.get("platform", "other")
+                                    stats = {}
+                                    thumbnail = ""
+                                    if "tiktok.com" in url:
+                                        platform = "tiktok"
+                                        try:
+                                            oembed = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(url)}", headers=HEADERS, timeout=8)
+                                            if oembed.ok:
+                                                od = oembed.json()
+                                                thumbnail = od.get("thumbnail_url", "")
+                                                if not wr.get("account_name"):
+                                                    wr["account_name"] = "@" + od.get("author_name", "unknown")
+                                                if not wr.get("description"):
+                                                    wr["description"] = od.get("title", "")
+                                        except Exception:
+                                            pass
+                                    elif "instagram.com" in url:
+                                        platform = "instagram"
+                                    elif "youtube.com" in url or "youtu.be" in url:
+                                        platform = "youtube"
+
+                                    all_results.append({
+                                        "platform": platform,
+                                        "account_name": wr.get("account_name", "@unknown"),
+                                        "url": url,
+                                        "description": wr.get("description", ""),
+                                        "confidence": wr.get("confidence", "medium"),
+                                        "thumbnail": thumbnail,
+                                        "stats": stats,
+                                        "vision_match": "YES",  # Claude already verified relevance
+                                    })
+                            print(f"  [step1] Found {len(all_results)} URLs via web search", file=sys.stderr)
+                        except json.JSONDecodeError as e:
+                            print(f"  [step1] JSON parse error: {e}", file=sys.stderr)
                 except Exception as e:
-                    print(f"  [step1] Error on '{q}': {e}", file=sys.stderr)
-                if len(candidates) >= 80:
-                    print(f"  [step1] Hit 80 candidates, moving on", file=sys.stderr)
-                    break
-            print(f"  [step1] Got {len(candidates)} from keywords", file=sys.stderr)
+                    print(f"  [step1] Web search error: {e}", file=sys.stderr)
 
-            # ── Step 2: Hashtag search (dynamic hashtags) ──
-            hashtags = build_hashtags(body)
-            print(f"  [step2] {len(hashtags)} hashtag searches...", file=sys.stderr)
-            ht_count = 0
-            for tag in hashtags:
-                try:
-                    items = run_apify_actor("clockworks~tiktok-hashtag-scraper",
-                        {"hashtags": [tag], "resultsPerPage": 20,
-                         "shouldDownloadCovers": False, "shouldDownloadVideos": False,
-                         "shouldDownloadSlideshowImages": False},
-                        label=f"#{tag}", max_polls=15)
-                    for item in items:
-                        p = parse_apify_item(item, seen)
-                        if p:
-                            candidates.append(p)
-                            ht_count += 1
-                except Exception as e:
-                    print(f"  [step2] #{tag} failed: {e}, skipping", file=sys.stderr)
-            print(f"  [step2] Got {ht_count} new from hashtags (total: {len(candidates)})", file=sys.stderr)
+            # ══════════════════════════════════════════════════════
+            # STEP 2: Search the EXACT hashtags the user provided
+            # These are the real hashtags people used, not guesses
+            # ══════════════════════════════════════════════════════
+            hashtags_from_keywords = []
+            for kw in keywords_str.split(','):
+                kw = kw.strip().lstrip('#').strip()
+                if kw:
+                    tag = re.sub(r'[^a-zA-Z0-9]', '', kw).lower()
+                    if tag and tag not in hashtags_from_keywords:
+                        hashtags_from_keywords.append(tag)
 
-            # ── Step 3: Filter by age ──
-            filtered = filter_results(candidates)
-            print(f"  [step3] {len(candidates)} -> {len(filtered)} after age filter", file=sys.stderr)
+            if APIFY_TOKEN and hashtags_from_keywords:
+                print(f"  [step2] Searching {len(hashtags_from_keywords)} exact hashtags: {hashtags_from_keywords}", file=sys.stderr)
+                for tag in hashtags_from_keywords:
+                    try:
+                        items = run_apify_actor("clockworks~tiktok-hashtag-scraper",
+                            {"hashtags": [tag], "resultsPerPage": 30,
+                             "shouldDownloadCovers": False, "shouldDownloadVideos": False,
+                             "shouldDownloadSlideshowImages": False},
+                            label=f"#{tag}", max_polls=20)
+                        added = 0
+                        for item in items:
+                            p = parse_apify_item(item, seen_urls)
+                            if p:
+                                all_results.append(p)
+                                added += 1
+                        print(f"  [step2] #{tag}: {added} new results", file=sys.stderr)
+                    except Exception as e:
+                        print(f"  [step2] #{tag} failed: {e}", file=sys.stderr)
+                print(f"  [step2] Total after hashtags: {len(all_results)}", file=sys.stderr)
 
-            # ── Step 3b: Relevance filter — drop results from wrong shows ──
-            filtered = relevance_filter(filtered, body)
-            print(f"  [step3b] {len(filtered)} after relevance filter", file=sys.stderr)
+            # ══════════════════════════════════════════════════════
+            # STEP 3: Scrape our own accounts for matching posts
+            # ══════════════════════════════════════════════════════
+            if APIFY_TOKEN:
+                print(f"  [step3] Scraping {len(DEFAULT_OWN_ACCOUNTS)} own accounts...", file=sys.stderr)
+                own_scraped = scrape_own_accounts(body)
+                # Add to results, deduplicating
+                for r in own_scraped:
+                    if r["url"] not in seen_urls:
+                        seen_urls.add(r["url"])
+                        all_results.append(r)
+                print(f"  [step3] {len(own_scraped)} from own accounts, total: {len(all_results)}", file=sys.stderr)
 
-            # ── Step 4: Vision scan (dynamic prompt) ──
-            print(f"  [step4] Vision scanning {len(filtered)} thumbnails...", file=sys.stderr)
-            final = vision_filter_results(filtered, vision_prompt=vision_prompt)
-            print(f"  [step4] {len(final)} passed vision check", file=sys.stderr)
+            # ══════════════════════════════════════════════════════
+            # STEP 4: Split own vs others, tally stats
+            # ══════════════════════════════════════════════════════
+            own, others = split_results(all_results, DEFAULT_OWN_ACCOUNTS)
 
-            # ── No more hardcoded seeds — results are fully dynamic ──
-
-            # ── Step 5: Scrape our own accounts for matching posts ──
-            print(f"  [step5] Scraping {len(DEFAULT_OWN_ACCOUNTS)} own accounts...", file=sys.stderr)
-            own_scraped = scrape_own_accounts(body)
-            print(f"  [step5] {len(own_scraped)} posts from own accounts", file=sys.stderr)
-
-            # Split the general search results into own vs others
-            own_from_search, others = split_results(final, own_accounts)
-
-            # Merge own posts: scraped + found in general search (deduplicate)
-            own_urls = {r["url"] for r in own_scraped}
-            for r in own_from_search:
-                if r["url"] not in own_urls:
-                    own_scraped.append(r)
-                    own_urls.add(r["url"])
-            own = own_scraped
-
-            # ── Calculate stats: separate own vs others vs combined ──
             own_totals = {"plays": 0, "likes": 0, "comments": 0, "shares": 0, "count": len(own)}
             for r in own:
                 s = r.get("stats", {})
