@@ -99,9 +99,98 @@ def get_metadata(url, platform):
     return {"title": f"{platform.title()} video", "author": author, "thumbnail_url": ""}
 
 
-# ── Anthropic API Search (Repost Finder) ─────────────────────
+# ── Anthropic API with proper tool_use loop ─────────────────
+# The web_search tool requires an agentic loop: the API returns tool_use blocks,
+# we must send tool_result blocks back until the model produces a final text response.
 
-SYSTEM_PROMPT = """You find reposts of viral videos and news articles about them. Return ONLY a JSON array.
+def anthropic_web_search(system_prompt, user_prompt, model="claude-sonnet-4-20250514", max_tokens=8192, max_turns=20):
+    """Call Anthropic API with web_search tool, handling the full agentic tool_use loop.
+    Returns the final text response after all web searches are complete."""
+    if not API_KEY:
+        return ""
+
+    headers = {
+        "x-api-key": API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    messages = [{"role": "user", "content": user_prompt}]
+
+    for turn in range(max_turns):
+        print(f"    [api] Turn {turn+1}...", file=sys.stderr)
+        try:
+            r = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json={
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "system": system_prompt,
+                    "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+                    "messages": messages,
+                },
+                timeout=120,
+            )
+            r.raise_for_status()
+            resp = r.json()
+        except Exception as e:
+            print(f"    [api] Error: {e}", file=sys.stderr)
+            break
+
+        stop_reason = resp.get("stop_reason", "")
+        content = resp.get("content", [])
+
+        # Log what we got back
+        block_types = [b.get("type") for b in content]
+        print(f"    [api] stop_reason={stop_reason}, blocks={block_types}", file=sys.stderr)
+
+        # If stop_reason is "end_turn" or we have text, we're done
+        if stop_reason == "end_turn":
+            text = "\n".join(b["text"] for b in content if b.get("type") == "text")
+            print(f"    [api] Final response: {len(text)} chars", file=sys.stderr)
+            return text
+
+        # If stop_reason is "tool_use", we need to continue the loop
+        # Add the assistant's response (with tool_use blocks) to messages
+        messages.append({"role": "assistant", "content": content})
+
+        # Build tool_result blocks for each tool_use
+        tool_results = []
+        for block in content:
+            if block.get("type") == "tool_use":
+                # For web_search, the API handles it server-side — we just acknowledge
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block["id"],
+                    "content": "Search completed.",
+                })
+
+        if tool_results:
+            messages.append({"role": "user", "content": tool_results})
+        else:
+            # No tool_use blocks and not end_turn — extract whatever text we have
+            text = "\n".join(b["text"] for b in content if b.get("type") == "text")
+            return text
+
+    print(f"    [api] Hit max turns ({max_turns})", file=sys.stderr)
+    return ""
+
+
+def parse_json_results(text):
+    """Extract a JSON array from text that may contain markdown formatting."""
+    cleaned = re.sub(r"```json|```", "", text).strip()
+    match = re.search(r"\[[\s\S]*\]", cleaned)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError as e:
+            print(f"    [json] Parse error: {e}", file=sys.stderr)
+    return []
+
+
+# ── Repost Finder search ─────────────────────────────────────
+
+REPOST_SYSTEM = """You find reposts of viral videos and news articles about them. Return ONLY a JSON array.
 Each object must have: platform (tiktok/instagram/youtube/facebook/twitter/other), account_name (@user or publication name), url (direct link), confidence (high/medium), date_found (YYYY-MM-DD).
 Search thoroughly. Return ONLY the JSON array, nothing else."""
 
@@ -109,23 +198,8 @@ def search_with_api(url, platform, metadata):
     title = metadata.get("title", "")
     author = metadata.get("author", "")
     prompt = f"Find all reposts and news coverage of this video:\nURL: {url}\nPlatform: {platform}\nTitle: {title}\nAuthor: @{author}\nSearch for: reposts on other platforms, news articles, reaction videos. Be thorough."
-    r = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={"x-api-key": API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-        json={"model": "claude-haiku-4-5-20251001", "max_tokens": 2048, "system": SYSTEM_PROMPT,
-              "tools": [{"type": "web_search_20250305", "name": "web_search"}],
-              "messages": [{"role": "user", "content": prompt}]},
-        timeout=60,
-    )
-    r.raise_for_status()
-    text = "\n".join(b["text"] for b in r.json().get("content", []) if b.get("type") == "text")
-    results = []
-    cleaned = re.sub(r"```json|```", "", text).strip()
-    match = re.search(r"\[[\s\S]*\]", cleaned)
-    if match:
-        try: results = json.loads(match.group(0))
-        except json.JSONDecodeError: pass
-    return results
+    text = anthropic_web_search(REPOST_SYSTEM, prompt, model="claude-sonnet-4-20250514", max_tokens=4096)
+    return parse_json_results(text)
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -716,7 +790,7 @@ class Handler(SimpleHTTPRequestHandler):
             ref_url = body.get('ref_video', '').strip()
             venue = body.get('venue', '').strip()
             date = body.get('date', '').strip()
-            ref_data = body.get('ref_data') or {}  # pre-loaded metadata from /api/load-ref
+            ref_data = body.get('ref_data') or {}
 
             if not ref_url:
                 return self.reply({"error": "Reference video URL is required"}, 400)
@@ -725,11 +799,10 @@ class Handler(SimpleHTTPRequestHandler):
             print(f"[event-search] Venue: {venue}, Date: {date}", file=sys.stderr)
 
             # ══════════════════════════════════════════════════════
-            # STEP 1: Get reference video metadata (if not pre-loaded)
+            # STEP 1: Get reference video metadata
             # ══════════════════════════════════════════════════════
             ref_title = ref_data.get('title', '')
             ref_author = ref_data.get('author', '')
-            ref_thumbnail = ref_data.get('thumbnail_url', '')
             ref_hashtags = ref_data.get('hashtags', [])
 
             if not ref_title and "tiktok.com" in ref_url:
@@ -739,7 +812,6 @@ class Handler(SimpleHTTPRequestHandler):
                         d = r.json()
                         ref_title = d.get("title", "")
                         ref_author = d.get("author_name", "")
-                        ref_thumbnail = d.get("thumbnail_url", "")
                         ref_hashtags = re.findall(r'#(\w+)', ref_title)
                 except Exception as e:
                     print(f"  [step1] oEmbed failed: {e}", file=sys.stderr)
@@ -747,173 +819,95 @@ class Handler(SimpleHTTPRequestHandler):
             print(f"  [ref] Title: {ref_title[:80]}", file=sys.stderr)
             print(f"  [ref] Author: {ref_author}", file=sys.stderr)
             print(f"  [ref] Hashtags: {ref_hashtags}", file=sys.stderr)
-            print(f"  [ref] Thumbnail: {bool(ref_thumbnail)}", file=sys.stderr)
 
-            # Download reference thumbnail for vision comparison
-            ref_b64 = None
-            if ref_thumbnail:
-                ref_b64 = download_thumbnail(ref_thumbnail)
-                print(f"  [ref] Thumbnail downloaded: {bool(ref_b64)}", file=sys.stderr)
-
-            seen_urls = {ref_url}  # don't include the reference video itself
+            seen_urls = {ref_url}
             all_results = []
 
             # ══════════════════════════════════════════════════════
-            # STEP 2: Anthropic web search using ref video info
+            # STEP 2: Anthropic web search (with PROPER tool_use loop)
+            # This is the ONLY discovery method — it actually works
+            # because it searches the real web, not TikTok's algorithm
             # ══════════════════════════════════════════════════════
-            print(f"  [step2] AI web search for matching videos...", file=sys.stderr)
-            if API_KEY:
-                # Build search terms from the reference video
-                search_terms = []
-                if ref_hashtags:
-                    search_terms.append(' '.join(f'#{t}' for t in ref_hashtags))
-                if ref_title:
-                    # Use key words from title (not hashtags)
-                    title_words = re.sub(r'#\w+', '', ref_title).strip()
-                    if title_words:
-                        search_terms.append(title_words[:100])
-                if venue:
-                    search_terms.append(venue.split(',')[0].strip())
+            print(f"  [step2] AI web search (with tool_use loop)...", file=sys.stderr)
 
-                search_prompt = f"""Find TikTok, Instagram, and YouTube videos of the SAME moment shown in this reference video:
+            hashtag_str = ' '.join(f'#{t}' for t in ref_hashtags)
+            venue_short = venue.split(',')[0].strip() if venue else ''
+            title_clean = re.sub(r'#\w+', '', ref_title).strip()
 
-REFERENCE VIDEO: {ref_url}
+            system = f"""You find TikTok, Instagram, YouTube videos and news articles about a SPECIFIC event.
+ONLY return results from {venue or 'this specific event'}{f' on or around {date}' if date else ''}.
+REJECT any result from a different city, venue, or date.
+Return ONLY a JSON array. Each object must have: platform, account_name, url, description, confidence, date_found."""
+
+            prompt = f"""Find every TikTok, Instagram, YouTube video and news article about this SPECIFIC moment:
+
+REFERENCE: {ref_url}
 TITLE: {ref_title}
 AUTHOR: @{ref_author}
-HASHTAGS: {' '.join('#'+t for t in ref_hashtags)}
 VENUE: {venue}
 DATE: {date}
 
-I need OTHER videos of this same event/moment from different angles and accounts.
-Search for:
-- site:tiktok.com {' '.join(search_terms)}
-- "{ref_title[:50]}" tiktok
-- {' '.join('#'+t for t in ref_hashtags[:3])} {venue.split(',')[0].strip() if venue else ''}
+Do MULTIPLE web searches to find as many results as possible:
+1. Search: {hashtag_str} {venue_short} tiktok
+2. Search: "{title_clean[:40]}" {venue_short}
+3. Search: site:tiktok.com {' '.join(ref_hashtags[:2])} {venue_short}
+4. Search: {venue_short} {' '.join(ref_hashtags)} instagram
+5. Search: {venue_short} {' '.join(ref_hashtags)} news coverage
 
-ONLY return results from {venue or 'this same event'}{f' on {date}' if date else ''}. REJECT videos from other events/cities.
-Find 20-40 specific video URLs. Return ONLY a JSON array.
-Each object: platform, account_name, url, description, confidence (high/medium), date_found."""
+For each result include the DIRECT URL to the video or article.
+ONLY include results from {venue}. Do NOT include results from other shows or cities.
+Return the JSON array with ALL results you found."""
 
-                try:
-                    r = requests.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={"x-api-key": API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                        json={
-                            "model": "claude-sonnet-4-20250514",
-                            "max_tokens": 8192,
-                            "system": f"You find videos of the SAME event/moment as a reference video. ONLY return results from {venue or 'this specific event'}. REJECT results from other cities/dates. Return ONLY a JSON array.",
-                            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
-                            "messages": [{"role": "user", "content": search_prompt}]
-                        },
-                        timeout=120,
-                    )
-                    r.raise_for_status()
-                    text = "\n".join(b["text"] for b in r.json().get("content", []) if b.get("type") == "text")
-                    cleaned = re.sub(r"```json|```", "", text).strip()
-                    match = re.search(r"\[[\s\S]*\]", cleaned)
-                    if match:
-                        web_results = json.loads(match.group(0))
-                        for wr in web_results:
-                            url = wr.get("url", "")
-                            if url and url not in seen_urls:
-                                seen_urls.add(url)
-                                platform = wr.get("platform", "other")
-                                thumbnail = ""
-                                if "tiktok.com" in url:
-                                    platform = "tiktok"
-                                    try:
-                                        oembed = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(url)}", headers=HEADERS, timeout=8)
-                                        if oembed.ok:
-                                            od = oembed.json()
-                                            thumbnail = od.get("thumbnail_url", "")
-                                            if not wr.get("account_name"):
-                                                wr["account_name"] = "@" + od.get("author_name", "unknown")
-                                            if not wr.get("description"):
-                                                wr["description"] = od.get("title", "")
-                                    except Exception:
-                                        pass
-                                elif "instagram.com" in url: platform = "instagram"
-                                elif "youtube.com" in url or "youtu.be" in url: platform = "youtube"
+            text = anthropic_web_search(system, prompt)
+            if text:
+                web_results = parse_json_results(text)
+                print(f"  [step2] Parsed {len(web_results)} results from web search", file=sys.stderr)
 
-                                all_results.append({
-                                    "platform": platform,
-                                    "account_name": wr.get("account_name", "@unknown"),
-                                    "url": url,
-                                    "description": wr.get("description", ""),
-                                    "thumbnail": thumbnail,
-                                    "stats": {},
-                                    "vision_match": "YES",
-                                })
-                        print(f"  [step2] Found {len(all_results)} URLs via web search", file=sys.stderr)
-                except Exception as e:
-                    print(f"  [step2] Web search error: {e}", file=sys.stderr)
+                # Enrich TikTok URLs with oEmbed for thumbnails/descriptions
+                for wr in web_results:
+                    url = wr.get("url", "")
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
 
-            # ══════════════════════════════════════════════════════
-            # STEP 3: Search EXACT hashtags from the reference video
-            # ══════════════════════════════════════════════════════
-            if APIFY_TOKEN and ref_hashtags:
-                print(f"  [step3] Searching {len(ref_hashtags)} hashtags from ref video: {ref_hashtags}", file=sys.stderr)
-                for tag in ref_hashtags:
-                    try:
-                        items = run_apify_actor("clockworks~tiktok-hashtag-scraper",
-                            {"hashtags": [tag], "resultsPerPage": 30,
-                             "shouldDownloadCovers": False, "shouldDownloadVideos": False,
-                             "shouldDownloadSlideshowImages": False},
-                            label=f"#{tag}", max_polls=20)
-                        added = 0
-                        for item in items:
-                            p = parse_apify_item(item, seen_urls)
-                            if p:
-                                all_results.append(p)
-                                added += 1
-                        print(f"  [step3] #{tag}: {added} new results", file=sys.stderr)
-                    except Exception as e:
-                        print(f"  [step3] #{tag} failed: {e}", file=sys.stderr)
+                    platform = wr.get("platform", "other")
+                    thumbnail = ""
 
-            # ══════════════════════════════════════════════════════
-            # STEP 4: Vision match — compare thumbnails to reference
-            # Uses BOTH thumbnail visual similarity AND description matching
-            # ══════════════════════════════════════════════════════
-            if ref_b64 and API_KEY and all_results:
-                print(f"  [step4] Vision matching {len(all_results)} results against reference...", file=sys.stderr)
-                vision_prompt = f"""I'm showing you two images. The FIRST is a reference video thumbnail. The SECOND is a candidate video thumbnail.
+                    if "tiktok.com" in url:
+                        platform = "tiktok"
+                        try:
+                            oembed = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(url)}", headers=HEADERS, timeout=8)
+                            if oembed.ok:
+                                od = oembed.json()
+                                thumbnail = od.get("thumbnail_url", "")
+                                if not wr.get("account_name") or wr["account_name"] == "@unknown":
+                                    wr["account_name"] = "@" + od.get("author_name", "unknown")
+                                if not wr.get("description"):
+                                    wr["description"] = od.get("title", "")
+                        except Exception:
+                            pass
+                    elif "instagram.com" in url: platform = "instagram"
+                    elif "youtube.com" in url or "youtu.be" in url: platform = "youtube"
 
-Do these appear to be from the SAME event or moment? Consider:
-- Same venue/stage/setting
-- Same performers or people
-- Similar lighting, crowd, angle
-- Related to: {ref_title[:100]}
+                    all_results.append({
+                        "platform": platform,
+                        "account_name": wr.get("account_name", "@unknown"),
+                        "url": url,
+                        "description": wr.get("description", ""),
+                        "thumbnail": thumbnail,
+                        "stats": {},
+                        "vision_match": "YES",
+                    })
 
-Respond with exactly one word: YES, MAYBE, or NO."""
-
-                matched = vision_filter_results(all_results, vision_prompt=vision_prompt)
-                print(f"  [step4] {len(matched)} passed vision check", file=sys.stderr)
+                print(f"  [step2] {len(all_results)} results after enrichment", file=sys.stderr)
             else:
-                matched = all_results
-                print(f"  [step4] Skipped vision (no ref thumbnail), keeping all {len(matched)}", file=sys.stderr)
+                print(f"  [step2] Web search returned no text!", file=sys.stderr)
 
             # ══════════════════════════════════════════════════════
-            # STEP 5: Scrape our own accounts for matching posts
+            # STEP 3: Split own vs others, tally stats
+            # No more Apify, no more vision, no more profile scraping
             # ══════════════════════════════════════════════════════
-            if APIFY_TOKEN:
-                # Build match terms from ref video
-                match_body = {
-                    'event': ref_title,
-                    'keywords': ','.join(ref_hashtags),
-                    'description': ref_title,
-                }
-                print(f"  [step5] Scraping {len(DEFAULT_OWN_ACCOUNTS)} own accounts...", file=sys.stderr)
-                own_scraped = scrape_own_accounts(match_body)
-                for r in own_scraped:
-                    if r["url"] not in seen_urls:
-                        seen_urls.add(r["url"])
-                        matched.append(r)
-                print(f"  [step5] {len(own_scraped)} from own accounts", file=sys.stderr)
-
-            # ══════════════════════════════════════════════════════
-            # STEP 6: Split own vs others, tally stats
-            # ══════════════════════════════════════════════════════
-            own, others = split_results(matched, DEFAULT_OWN_ACCOUNTS)
+            own, others = split_results(all_results, DEFAULT_OWN_ACCOUNTS)
 
             own_totals = {"plays": 0, "likes": 0, "comments": 0, "shares": 0, "count": len(own)}
             for r in own:
