@@ -23,8 +23,26 @@ HEADERS = {"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"}
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
 
-# ── Default own accounts (can be overridden per request) ─────
-DEFAULT_OWN_ACCOUNTS = {"greatamericanbarscene", "zachbryanarchive", "oklahomanoutlaw", "harleycarmichael"}
+# ── Master account list (all exist on both TikTok and Instagram) ─────
+DEFAULT_OWN_ACCOUNTS = {
+    # Zach Bryan pages
+    "americanharddrive", "greatamericanbarscene", "morezachbryan", "oklahomanoutlaw",
+    "runnyeggsz", "withheavenontok", "zachbryanarchive", "harleycarmichael",
+    # Ella Langley pages
+    "ellalangleyarchive", "ellalangleyextras", "ellalangleylately", "fellas4ella", "langleyloyalists",
+    # Ole 60 pages
+    "moreole60", "ole60archive", "ole60fans", "ole60vault",
+    # Joshua Slone pages
+    "isabelledavis97", "joshuaslonearchive", "joshuaslonenation", "morejoshuaslone",
+    # Phil Kane pages
+    "phil.kane.hq", "philkanehq",
+    # Gabriella Rose pages
+    "gabriellarosearchive",
+    # Other affiliated accounts
+    "barnburners", "colt.johnsontx", "folktunez", "graciekahan", "gunnarhendo",
+    "harmonyandtwang", "kaylaalist", "maddiespamzzzz99", "oklahomasmokeshow02",
+    "roadshowrecap", "spamrynnnn",
+}
 
 # ── Cache ────────────────────────────────────────────────────
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")

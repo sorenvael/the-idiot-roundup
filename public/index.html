@@ -636,10 +636,6 @@ textarea.in98{resize:vertical;min-height:40px}
             <label class="lbl98">Video URL:</label>
             <input class="in98" type="text" id="urlInput" placeholder="https://www.tiktok.com/@user/video/123456..."/>
           </div>
-          <div class="field">
-            <label class="lbl98">Your accounts (comma separated):</label>
-            <input class="in98" type="text" id="rpOwn" placeholder="e.g. @greatamericanbarscene, @harleycarmichael" value="@greatamericanbarscene, @oklahomanoutlaw, @zachbryanarchive, @harleycarmichael"/>
-          </div>
           <div class="btn-row">
             <button class="btn98" onclick="reset()">Clear</button>
             <button class="btn98 btn98-fire" id="rpBtn" onclick="doRepost()">🔥 Round 'em Up</button>
@@ -659,7 +655,6 @@ textarea.in98{resize:vertical;min-height:40px}
           <div class="field"><label class="lbl98">Reference video URL:</label><input class="in98" type="text" id="evRef" placeholder="https://www.tiktok.com/@user/video/..."/></div>
           <div class="field"><label class="lbl98">Describe the moment:</label><textarea class="in98" id="evDesc" placeholder="e.g. Fan in flame shirt came on stage during 'Revival', danced with LED gloves"></textarea></div>
           <div class="field"><label class="lbl98">Keywords (comma separated):</label><input class="in98" type="text" id="evKw" placeholder="e.g. gloving, glover, harley, carmichael"/></div>
-          <div class="field"><label class="lbl98">Your TikTok accounts (comma separated):</label><input class="in98" type="text" id="evOwn" placeholder="e.g. @greatamericanbarscene, @harleycarmichael"/></div>
           <div class="btn-row">
             <button class="btn98" onclick="reset()">Clear</button>
             <button class="btn98 btn98-fire" id="evBtn" onclick="doEvent()">🔥 Find Every Angle</button>
@@ -869,14 +864,30 @@ function markBad(url,cardEl){
 
 function isKnownBad(url){return feedbackMemory.bad.has(url)}
 
-// ── Client-side own account detection ──
+// ── Master account list (TikTok + Instagram) ──
+const OWN_ACCOUNTS_MASTER=[
+  // Zach Bryan pages
+  'americanharddrive','greatamericanbarscene','morezachbryan','oklahomanoutlaw',
+  'runnyeggsz','withheavenontok','zachbryanarchive','harleycarmichael',
+  // Ella Langley pages
+  'ellalangleyarchive','ellalangleyextras','ellalangleylately','fellas4ella','langleyloyalists',
+  // Ole 60 pages
+  'moreole60','ole60archive','ole60fans','ole60vault',
+  // Joshua Slone pages
+  'isabelledavis97','joshuaslonearchive','joshuaslonenation','morejoshuaslone',
+  // Phil Kane pages
+  'phil.kane.hq','philkanehq',
+  // Gabriella Rose pages
+  'gabriellarosearchive',
+  // Other affiliated accounts
+  'barnburners','colt.johnsontx','folktunez','graciekahan','gunnarhendo',
+  'harmonyandtwang','kaylaalist','maddiespamzzzz99','oklahomasmokeshow02',
+  'roadshowrecap','spamrynnnn'
+];
+const OWN_ACCOUNTS_SET=new Set(OWN_ACCOUNTS_MASTER.map(a=>a.toLowerCase()));
+
 function getOwnAccounts(){
-  // Merge from both panels (repost + event) + defaults
-  const defaults=['greatamericanbarscene','oklahomanoutlaw','zachbryanarchive','harleycarmichael'];
-  const rpVal=($('rpOwn')||{}).value||'';
-  const evVal=($('evOwn')||{}).value||'';
-  const all=(rpVal+','+evVal).split(',').map(a=>a.trim().replace(/^@/,'').toLowerCase()).filter(Boolean);
-  return new Set([...defaults,...all]);
+  return OWN_ACCOUNTS_SET;
 }
 
 function isOwnAccount(r){
@@ -986,7 +997,7 @@ async function doEvent(){
 
   try{
     const resp=await fetch('/api/event-search',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({event:name,venue:$('evVenue').value.trim(),date:$('evDate').value,timeframe:$('evTime').value.trim(),ref_video:$('evRef').value.trim(),description:desc,keywords:$('evKw').value.trim(),own_accounts:$('evOwn').value.trim(),platforms:'tiktok, instagram'})});
+      body:JSON.stringify({event:name,venue:$('evVenue').value.trim(),date:$('evDate').value,timeframe:$('evTime').value.trim(),ref_video:$('evRef').value.trim(),description:desc,keywords:$('evKw').value.trim(),platforms:'tiktok, instagram'})});
     [t1,t2,t3].forEach(clearTimeout);
     const data=await resp.json();if(data.error)throw new Error(data.error);
     const res=data.results||[],own=data.own_posts||[],totals=data.totals||{},total=res.length+own.length;
