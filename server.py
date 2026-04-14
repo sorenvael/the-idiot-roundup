@@ -431,7 +431,7 @@ def filter_results(results):
     return out
 
 def build_search_queries(event_info):
-    """Build search queries dynamically from ALL user-provided event info."""
+    """Build search queries dynamically — venue/location-specific queries come FIRST."""
     event = event_info.get('event', '').strip()
     venue = event_info.get('venue', '').strip()
     description = event_info.get('description', '').strip()
@@ -447,56 +447,135 @@ def build_search_queries(event_info):
             seen.add(q.lower())
             queries.append(q)
 
-    # Event name is the core query
-    if event:
-        add(event)
+    # ── PRIORITY 1: Venue/location-specific queries (most specific first) ──
+    # Parse venue into parts (e.g. "raymond james stadium" -> ["raymond james stadium", "raymond james"])
+    venue_parts = []
+    if venue:
+        venue_full = venue.split(',')[0].strip()
+        venue_parts.append(venue_full)
+        # Also try shorter version (first two words)
+        vwords = venue_full.split()
+        if len(vwords) > 2:
+            venue_parts.append(' '.join(vwords[:2]))
+        # Extract city from venue (after comma)
+        if ',' in venue:
+            city = venue.split(',')[1].strip().split()[0]  # first word after comma
+            if city and len(city) > 2:
+                venue_parts.append(city)
 
-    # Event + venue
-    if event and venue:
-        venue_short = venue.split(',')[0].strip()  # e.g. "Alamodome" from "Alamodome, San Antonio TX"
-        add(f"{event} {venue_short}")
+    # Venue + each keyword (most targeted queries)
+    for vp in venue_parts:
+        for kw in keywords:
+            add(f"{kw} {vp}")
+        if event:
+            add(f"{event} {vp}")
 
-    # Each keyword alone and combined with event
+    # ── PRIORITY 2: Keyword combos (specific to the moment) ──
+    # Multi-keyword combos (e.g. "baker mayfield zach bryan tampa")
+    if len(keywords) >= 2:
+        add(' '.join(keywords[:3]))
     for kw in keywords:
         add(kw)
         if event:
             add(f"{event} {kw}")
 
-    # Extract key phrases from the description (first 3 meaningful phrases)
+    # ── PRIORITY 3: Description phrases ──
     if description:
-        # Simple extraction: split on commas/periods, take short phrases
         phrases = [p.strip() for p in re.split(r'[,.]', description) if len(p.strip()) > 3]
         for phrase in phrases[:3]:
-            # Use first few words of each phrase
-            words = phrase.split()[:4]
+            words = phrase.split()[:5]
             add(' '.join(words))
 
-    # If we still don't have enough queries, add broader combinations
-    if venue and keywords:
-        for kw in keywords[:3]:
-            add(f"{venue.split(',')[0].strip()} {kw}")
+    # ── PRIORITY 4: Broader event queries (lowest priority) ──
+    if event:
+        add(event)
 
-    print(f"  [queries] Built {len(queries)} dynamic queries: {queries[:5]}...", file=sys.stderr)
+    print(f"  [queries] Built {len(queries)} dynamic queries:", file=sys.stderr)
+    for i, q in enumerate(queries):
+        print(f"    {i+1}. {q}", file=sys.stderr)
     return queries
 
 def build_hashtags(event_info):
-    """Build hashtag list dynamically from event info."""
+    """Build hashtag list dynamically — includes venue/location hashtags."""
     event = event_info.get('event', '').strip()
+    venue = event_info.get('venue', '').strip()
     keywords_str = event_info.get('keywords', '')
     keywords = [k.strip() for k in keywords_str.split(',') if k.strip()]
 
     hashtags = []
-    # Generate hashtags from event name (remove spaces)
-    if event:
-        hashtags.append(re.sub(r'[^a-zA-Z0-9]', '', event).lower())
-    # Generate hashtags from keywords
-    for kw in keywords:
-        tag = re.sub(r'[^a-zA-Z0-9]', '', kw).lower()
-        if tag and tag not in hashtags:
+    seen = set()
+
+    def add_tag(text):
+        tag = re.sub(r'[^a-zA-Z0-9]', '', text).lower()
+        if tag and tag not in seen:
+            seen.add(tag)
             hashtags.append(tag)
+
+    # Venue-based hashtags (highest priority)
+    if venue:
+        # Full venue as hashtag
+        add_tag(venue.split(',')[0].strip())
+        # Individual venue words > 3 chars
+        for w in venue.replace(',', ' ').split():
+            if len(w) > 3:
+                add_tag(w)
+        # Venue + event combo
+        if event:
+            first_venue_word = venue.split(',')[0].strip().split()[0]
+            add_tag(f"{event} {first_venue_word}")
+
+    # Keyword hashtags
+    for kw in keywords:
+        add_tag(kw)
+
+    # Event hashtag
+    if event:
+        add_tag(event)
 
     print(f"  [hashtags] Built {len(hashtags)} dynamic hashtags: {hashtags}", file=sys.stderr)
     return hashtags
+
+
+# ── Relevance filter: reject results that don't match the event ──
+def relevance_filter(results, event_info):
+    """Filter results to only keep ones that actually relate to the specified event/venue."""
+    venue = event_info.get('venue', '').lower().strip()
+    keywords_str = event_info.get('keywords', '')
+    description = event_info.get('description', '').lower().strip()
+    keywords = [k.strip().lower() for k in keywords_str.split(',') if k.strip()]
+
+    # Build relevance terms from venue, keywords, and description
+    relevance_terms = set()
+    if venue:
+        for w in venue.replace(',', ' ').split():
+            if len(w) > 3:
+                relevance_terms.add(w.lower())
+    for kw in keywords:
+        for w in kw.split():
+            if len(w) > 3:
+                relevance_terms.add(w.lower())
+
+    if not relevance_terms:
+        return results  # can't filter without terms
+
+    print(f"  [relevance] Filtering with terms: {relevance_terms}", file=sys.stderr)
+
+    kept = []
+    dropped = 0
+    for r in results:
+        desc = (r.get("description") or "").lower()
+        url = (r.get("url") or "").lower()
+        acct = (r.get("account_name") or "").lower()
+        combined = f"{desc} {url} {acct}"
+
+        # Keep if ANY relevance term matches
+        if any(term in combined for term in relevance_terms):
+            kept.append(r)
+        else:
+            dropped += 1
+
+    print(f"  [relevance] Kept {len(kept)}, dropped {dropped} irrelevant results", file=sys.stderr)
+    return kept
 
 
 # ── HTTP Server ──────────────────────────────────────────────
@@ -595,9 +674,13 @@ class Handler(SimpleHTTPRequestHandler):
                     print(f"  [step2] #{tag} failed: {e}, skipping", file=sys.stderr)
             print(f"  [step2] Got {ht_count} new from hashtags (total: {len(candidates)})", file=sys.stderr)
 
-            # ── Step 3: Filter out junk ──
+            # ── Step 3: Filter by age ──
             filtered = filter_results(candidates)
-            print(f"  [step3] {len(candidates)} -> {len(filtered)} after text filter", file=sys.stderr)
+            print(f"  [step3] {len(candidates)} -> {len(filtered)} after age filter", file=sys.stderr)
+
+            # ── Step 3b: Relevance filter — drop results from wrong shows ──
+            filtered = relevance_filter(filtered, body)
+            print(f"  [step3b] {len(filtered)} after relevance filter", file=sys.stderr)
 
             # ── Step 4: Vision scan (dynamic prompt) ──
             print(f"  [step4] Vision scanning {len(filtered)} thumbnails...", file=sys.stderr)
