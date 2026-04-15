@@ -981,38 +981,55 @@ class Handler(SimpleHTTPRequestHandler):
             key_accounts = ['oklahomanoutlaw', 'greatamericanbarscene', 'zachbryanarchive',
                             'morezachbryan', 'americanharddrive', 'withheavenontok']
 
-            system = """You are a social media researcher. Search the web and list every URL you find. ONLY include these types of results:
-- TikTok video links
-- Instagram video/post links
-- YouTube video links
-- News articles about the event
+            system = """You are a social media researcher. Find as many TikTok videos, Instagram posts, YouTube videos, and news articles as possible about a specific event.
 
-DO NOT include ticketing sites, setlist sites, Spotify, or any non-content URLs. List each URL on its own line. Be thorough — do multiple searches."""
+RULES:
+- ONLY include: TikTok videos, Instagram posts/reels, YouTube videos, news articles
+- DO NOT include: ticketing sites, Spotify, setlist sites, Wikipedia, non-content pages
+- For each result write: @account - description - FULL URL
+- Do at least 6-8 different searches to maximize results
+- Aim for 20-30+ results"""
 
-            prompt = f"""Find every video and article about this event:
+            prompt = f"""Find every TikTok video, Instagram post, YouTube video, and news article about this event:
 
-- {ref_title}
-- Venue: {venue}
-- Date: {date}
+REFERENCE VIDEO: {ref_url}
+TITLE: {ref_title}
+AUTHOR: @{ref_author}
+VENUE: {venue}
+DATE: {date}
+HASHTAGS: {hashtag_str}
 
-Search for:
-1. {' '.join(ref_hashtags[:2])} {venue_short} tiktok
+Do ALL of these searches:
+1. {' '.join(ref_hashtags[:2])} {venue_short} tiktok videos
 2. site:tiktok.com {' '.join(ref_hashtags[:2])} {venue_short}
 3. {title_clean[:40]} {venue_short} instagram
-4. {' '.join(ref_hashtags)} {venue_short} news
+4. site:instagram.com {' '.join(ref_hashtags[:2])} {venue_short}
+5. {' '.join(ref_hashtags)} {venue_short} news article
+6. oklahomanoutlaw OR zachbryanarchive OR greatamericanbarscene {venue_short} {ref_hashtags[0] if ref_hashtags else ''}
+7. morezachbryan OR americanharddrive OR withheavenontok {venue_short} {ref_hashtags[0] if ref_hashtags else ''}
+8. "{title_clean[:30]}" youtube
 
-Also search for these specific accounts posting about this event:
-5. oklahomanoutlaw {venue_short} {ref_hashtags[0] if ref_hashtags else ''}
-6. zachbryanarchive {venue_short} {ref_hashtags[0] if ref_hashtags else ''}
-
-List every URL you find. Include the full URL for each result."""
+List every URL with the @account name. Find at least 20 results."""
 
             text = anthropic_web_search(system, prompt)
             if text:
                 print(f"  [step2] Got {len(text)} chars from web search", file=sys.stderr)
                 print(f"  [step2] Preview: {text[:300]}", file=sys.stderr)
 
-                # ── Extract URLs from response — only social media + news ──
+                # ── Extract URLs + nearby context (for account names) ──
+                # Grab each URL with surrounding text so we can find the account name
+                url_context = {}  # url -> nearby text
+                for m in re.finditer(r'(?:@([\w.]+)\s*[-—:]*\s*)?(https?://(?:www\.)?(?:tiktok\.com|instagram\.com|youtube\.com|youtu\.be|twitter\.com|x\.com|facebook\.com|[\w.-]+\.(?:com|org|net))/[^\s\)"\'<>\]]*)', text):
+                    url = m.group(2).rstrip('.,;:)')
+                    nearby_account = m.group(1)  # captured @account before URL if present
+                    url_context[url] = nearby_account
+
+                # Also try to extract @mentions near URLs from the full text
+                for m in re.finditer(r'@([\w.]+)[^\n]*?(https?://[^\s\)"\'<>\]]+)', text):
+                    url = m.group(2).rstrip('.,;:)')
+                    if url not in url_context or not url_context[url]:
+                        url_context[url] = m.group(1)
+
                 url_pattern = r'https?://(?:www\.)?(?:tiktok\.com|instagram\.com|youtube\.com|youtu\.be|twitter\.com|x\.com|facebook\.com|[\w.-]+\.(?:com|org|net))/[^\s\)"\'<>\]]*'
                 raw_urls = list(set(re.findall(url_pattern, text)))
                 raw_urls = [u.rstrip('.,;:)') for u in raw_urls]
@@ -1067,9 +1084,13 @@ List every URL you find. Include the full URL for each result."""
                             return "@" + parts[0]
                         return None
 
+                    # Check if we got an account name from the text near the URL
+                    context_account = url_context.get(url)
+                    if context_account:
+                        account = "@" + context_account
+
                     if "tiktok.com" in url:
                         platform = "tiktok"
-                        # Get account from URL first as fallback
                         url_account = account_from_url(url)
                         if url_account:
                             account = url_account
