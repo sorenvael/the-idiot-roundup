@@ -427,26 +427,45 @@ def scrape_instagram_stats(urls):
         return {}
     print(f"  [ig-stats] Scraping {len(urls)} Instagram posts...", file=sys.stderr)
     try:
+        # Instagram Post Scraper expects "shortcodes" or "urls" as input
         items = run_apify_actor("apify~instagram-post-scraper",
-            {"directUrls": urls, "resultsLimit": len(urls)},
+            {"urls": urls},
             label="ig-stats", poll_interval=3, max_polls=30)
+        if not items:
+            # Try alternative actor
+            print(f"  [ig-stats] First actor returned 0, trying alternative...", file=sys.stderr)
+            items = run_apify_actor("apify~instagram-scraper",
+                {"directUrls": urls, "resultsType": "posts", "resultsLimit": len(urls)},
+                label="ig-stats-v2", poll_interval=3, max_polls=30)
         stats = {}
         for item in items:
-            post_url = item.get("url") or item.get("inputUrl") or ""
-            if post_url:
-                stats[post_url] = {
+            post_url = item.get("url") or item.get("inputUrl") or item.get("shortCode") or ""
+            # Try to match back to our input URLs
+            matched_url = ""
+            for u in urls:
+                if post_url and (post_url in u or u in post_url):
+                    matched_url = u
+                    break
+                sc = item.get("shortCode") or ""
+                if sc and sc in u:
+                    matched_url = u
+                    break
+            if not matched_url and post_url:
+                matched_url = post_url
+
+            if matched_url:
+                stats[matched_url] = {
                     "plays": item.get("videoPlayCount", 0) or item.get("videoViewCount", 0) or 0,
-                    "likes": item.get("likesCount", 0) or 0,
-                    "comments": item.get("commentsCount", 0) or 0,
-                    "shares": 0,  # Instagram doesn't expose shares via scraping
+                    "likes": item.get("likesCount", 0) or item.get("likes", 0) or 0,
+                    "comments": item.get("commentsCount", 0) or item.get("comments", 0) or 0,
+                    "shares": 0,
                 }
-                # Also grab the real account name and description
                 owner = item.get("ownerUsername") or item.get("ownerFullName") or ""
                 if owner:
-                    stats[post_url]["_account"] = "@" + owner
-                caption = item.get("caption") or ""
+                    stats[matched_url]["_account"] = "@" + owner
+                caption = item.get("caption") or item.get("text") or ""
                 if caption:
-                    stats[post_url]["_description"] = caption[:200]
+                    stats[matched_url]["_description"] = caption[:200]
         print(f"  [ig-stats] Got stats for {len(stats)} posts", file=sys.stderr)
         return stats
     except Exception as e:
@@ -1136,6 +1155,7 @@ class Handler(SimpleHTTPRequestHandler):
 Each object must have: platform (tiktok/instagram/youtube/facebook/twitter/other), account_name (@user or publication name), url (direct link), confidence (high/medium), date_found (YYYY-MM-DD).
 Include reposts on TikTok, Instagram, YouTube, Facebook, Twitter/X, and news articles.
 DO NOT include ticketing sites, Spotify, setlist sites, or Wikipedia.
+CRITICAL: URLs must be COMPLETE. TikTok video IDs are 19 digits long (e.g. /video/7617387002085870861). NEVER truncate URLs.
 Search thoroughly. Return ONLY the JSON array, nothing else."""
 
             prompt = f"""Find all reposts and coverage of this video:
