@@ -603,6 +603,43 @@ class Handler(SimpleHTTPRequestHandler):
         raw_results = parse_json_results(text)
         log(f"  [step1] Parsed {len(raw_results)} results")
 
+        # Step 2b: Scrape our accounts' profiles for matching posts
+        if APIFY_TOKEN:
+            title_words = re.sub(r"#\w+", "", meta["title"]).lower().split()
+            match_terms = {w for w in title_words if len(w) > 3}
+            match_terms.update(h.lower() for h in meta["hashtags"])
+            log(f"  [step2b] Scraping {len(relevant)} account profiles (match: {list(match_terms)[:5]})...")
+
+            # Batch profiles — scrape 10 at a time
+            for i in range(0, len(relevant), 10):
+                batch = relevant[i:i+10]
+                try:
+                    items = run_apify("clockworks~tiktok-profile-scraper",
+                                     {"profiles": batch, "resultsPerPage": 10},
+                                     label=f"profiles batch {i//10+1}", poll_interval=3, max_polls=25)
+                    found = 0
+                    for item in items:
+                        vid_url = item.get("webVideoUrl") or item.get("videoUrl") or item.get("url") or ""
+                        desc = (item.get("text") or item.get("desc") or "").lower()
+                        author = (item.get("authorMeta", {}).get("name", "") or
+                                  item.get("author", {}).get("uniqueId", "") or
+                                  item.get("authorName", "") or "").lower()
+                        # Check if this post matches the reference video topic
+                        if vid_url and any(t in desc for t in match_terms):
+                            raw_results.append({
+                                "url": vid_url,
+                                "platform": "tiktok",
+                                "account_name": "@" + author if author else "@unknown",
+                                "description": desc[:200],
+                            })
+                            found += 1
+                    if found:
+                        log(f"    [profiles] Batch {i//10+1}: {found} matching posts")
+                except Exception as e:
+                    log(f"    [profiles] Batch {i//10+1} error: {e}")
+
+            log(f"  [step2b] Total results after profile scrape: {len(raw_results)}")
+
         # Step 3: Enrich each result (detect platform, get oEmbed data, extract real account)
         seen = {url}  # skip the reference video itself
         enriched = []
