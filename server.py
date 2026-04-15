@@ -1126,56 +1126,41 @@ class Handler(SimpleHTTPRequestHandler):
             meta = get_metadata(url, platform or "tiktok")
             print(f"  [meta] Title: {meta.get('title','')[:60]}, Author: {meta.get('author','')}", file=sys.stderr)
 
-            # ── Step 2: Search for reposts (same function as repost finder) ──
-            print(f"  [step1] Searching all platforms for reposts...", file=sys.stderr)
-            results = search_with_api(url, platform or "tiktok", meta)
+            # ── Step 1: Search all platforms including our accounts ──
+            title = meta.get("title", "")
+            author = meta.get("author", "")
+            hashtags = re.findall(r'#(\w+)', title)
+            title_clean = re.sub(r'#\w+', '', title).strip()
+
+            system = """You find reposts of viral videos and news articles about them. Return ONLY a JSON array.
+Each object must have: platform (tiktok/instagram/youtube/facebook/twitter/other), account_name (@user or publication name), url (direct link), confidence (high/medium), date_found (YYYY-MM-DD).
+Include reposts on TikTok, Instagram, YouTube, Facebook, Twitter/X, and news articles.
+DO NOT include ticketing sites, Spotify, setlist sites, or Wikipedia.
+Search thoroughly. Return ONLY the JSON array, nothing else."""
+
+            prompt = f"""Find all reposts and coverage of this video:
+
+URL: {url}
+Platform: {platform}
+Title: {title}
+Author: @{author}
+
+Search for reposts on other platforms, news articles, reaction videos. Be thorough.
+
+ALSO specifically search for posts about this from these accounts (they are affiliated — search each one):
+- site:tiktok.com @oklahomanoutlaw {' '.join(hashtags[:2]) if hashtags else title_clean[:30]}
+- site:tiktok.com @zachbryanarchive {' '.join(hashtags[:2]) if hashtags else title_clean[:30]}
+- site:tiktok.com @greatamericanbarscene {' '.join(hashtags[:2]) if hashtags else title_clean[:30]}
+- site:tiktok.com @morezachbryan {' '.join(hashtags[:2]) if hashtags else title_clean[:30]}
+- site:tiktok.com @americanharddrive {' '.join(hashtags[:2]) if hashtags else title_clean[:30]}
+- site:tiktok.com @withheavenontok {' '.join(hashtags[:2]) if hashtags else title_clean[:30]}
+
+Return as many results as you can find."""
+
+            print(f"  [step1] Searching all platforms + our accounts...", file=sys.stderr)
+            text = anthropic_web_search(system, prompt, max_tokens=4096)
+            results = parse_json_results(text)
             print(f"  [step1] Found {len(results)} results", file=sys.stderr)
-
-            # ── Step 1b: Search our own accounts on TikTok for this moment ──
-            if APIFY_TOKEN and meta.get("title"):
-                # Extract keywords from the reference video title (without hashtags)
-                title_clean = re.sub(r'#\w+', '', meta.get("title", "")).strip()
-                # Use first few meaningful words as search terms
-                search_words = [w for w in title_clean.split() if len(w) > 2][:4]
-                search_term = ' '.join(search_words) if search_words else title_clean[:30]
-
-                # Search key accounts — batch into groups to limit Apify calls
-                key_accounts = [
-                    'zachbryanarchive', 'oklahomanoutlaw', 'greatamericanbarscene',
-                    'morezachbryan', 'americanharddrive', 'withheavenontok',
-                    'ellalangleyarchive', 'langleyloyalists', 'morejoshuaslone',
-                    'ole60archive', 'philkanehq', 'gabriellarosearchive',
-                    'roadshowrecap', 'barnburners', 'harleycarmichael',
-                ]
-                print(f"  [step1b] Searching {len(key_accounts)} own accounts for '{search_term}'...", file=sys.stderr)
-
-                for acct in key_accounts:
-                    query = f"{acct} {search_term}"
-                    try:
-                        items = run_apify_actor("clockworks~tiktok-scraper",
-                            {"searchQueries": [query], "resultsPerPage": 5,
-                             "shouldDownloadCovers": False, "shouldDownloadVideos": False,
-                             "shouldDownloadSlideshowImages": False},
-                            label=f"@{acct}", poll_interval=2, max_polls=10)
-                        for item in items:
-                            # Only keep if it's actually from this account
-                            author = (item.get("authorMeta", {}).get("name", "") or
-                                      item.get("author", {}).get("uniqueId", "") or
-                                      item.get("authorName", "") or "").lower()
-                            if acct.lower() in author:
-                                video_url = item.get("webVideoUrl") or item.get("videoUrl") or item.get("url") or ""
-                                if video_url:
-                                    results.append({
-                                        "platform": "tiktok",
-                                        "account_name": f"@{author}",
-                                        "url": video_url,
-                                        "description": (item.get("text") or item.get("desc") or "")[:200],
-                                    })
-                                    print(f"    [found] @{author}: {(item.get('text') or '')[:40]}", file=sys.stderr)
-                    except Exception as e:
-                        print(f"    [@{acct}] failed: {e}", file=sys.stderr)
-
-                print(f"  [step1b] Total results after own account search: {len(results)}", file=sys.stderr)
 
             # ── Step 2: Build result objects, detect platform from URL ──
             all_results = []
