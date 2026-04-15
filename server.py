@@ -1129,7 +1129,56 @@ List every URL you find. Include the full URL for each result."""
                 print(f"  [step2] Web search returned no text!", file=sys.stderr)
 
             # ══════════════════════════════════════════════════════
-            # STEP 3: Apply learned feedback, then split own vs others
+            # STEP 3: Scrape TikTok URLs via Apify for real stats
+            # oEmbed doesn't return views/likes — Apify does
+            # ══════════════════════════════════════════════════════
+            tiktok_urls = [r["url"] for r in all_results if r.get("platform") == "tiktok" and "/video/" in r.get("url", "")]
+            if APIFY_TOKEN and tiktok_urls:
+                print(f"  [step3] Scraping stats for {len(tiktok_urls)} TikTok URLs via Apify...", file=sys.stderr)
+                try:
+                    items = run_apify_actor("clockworks~tiktok-scraper",
+                        {"postURLs": tiktok_urls,
+                         "shouldDownloadCovers": False, "shouldDownloadVideos": False,
+                         "shouldDownloadSlideshowImages": False},
+                        label="stats scrape", poll_interval=3, max_polls=30)
+
+                    # Build a lookup from URL to stats
+                    stats_map = {}
+                    for item in items:
+                        video_url = item.get("webVideoUrl") or item.get("videoUrl") or item.get("url") or ""
+                        if video_url:
+                            stats_map[video_url] = extract_stats(item)
+
+                    # Apply stats to our results
+                    matched_stats = 0
+                    for r in all_results:
+                        url = r.get("url", "")
+                        if url in stats_map:
+                            r["stats"] = stats_map[url]
+                            matched_stats += 1
+                        else:
+                            # Try matching without query params
+                            clean = re.sub(r'\?.*$', '', url)
+                            for su, st in stats_map.items():
+                                if re.sub(r'\?.*$', '', su) == clean:
+                                    r["stats"] = st
+                                    matched_stats += 1
+                                    break
+
+                    print(f"  [step3] Got stats for {matched_stats}/{len(tiktok_urls)} videos", file=sys.stderr)
+                    if stats_map:
+                        sample = list(stats_map.values())[0]
+                        print(f"  [step3] Sample: plays={sample.get('plays')}, likes={sample.get('likes')}", file=sys.stderr)
+                except Exception as e:
+                    print(f"  [step3] Stats scrape error: {e}", file=sys.stderr)
+            else:
+                if not tiktok_urls:
+                    print(f"  [step3] No TikTok URLs to scrape stats for", file=sys.stderr)
+                elif not APIFY_TOKEN:
+                    print(f"  [step3] No Apify token — can't scrape stats", file=sys.stderr)
+
+            # ══════════════════════════════════════════════════════
+            # STEP 4: Apply learned feedback, then split and tally
             # ══════════════════════════════════════════════════════
             all_results = apply_feedback(all_results)
             own, others = split_results(all_results, DEFAULT_OWN_ACCOUNTS)

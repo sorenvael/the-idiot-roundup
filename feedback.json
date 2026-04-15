@@ -1,0 +1,38 @@
+{
+  "good": [
+    {
+      "url": "https://www.instagram.com/p/DV7GjuSEm6U/",
+      "account": "@unknown",
+      "domain": "instagram.com",
+      "platform": "instagram",
+      "description": "",
+      "timestamp": 1776212918.6602051
+    }
+  ],
+  "bad": [
+    {
+      "url": "https://www.tiktok.com/@oklahomanoutlaw/video/7386407000013409582",
+      "account": "@Oklahoman Outlaw",
+      "domain": "tiktok.com",
+      "platform": "tiktok",
+      "description": "Zach Bryan posted a new teaser to his song \u2018Bass Boat\u2019 on his social media #ZachBryan #zachbryanalbum #zachbryannewalbumreleasedate #oklahomanoutlaw #zachbryan #countrymusic #newzachbryansong #zachbryansong #zachbryanmusic #countrysongs #quittintimetour #zachbryanreleasedate ",
+      "timestamp": 1776212890.497501
+    },
+    {
+      "url": "https://www.instagram.com/p/DVr09ZxkVhl/",
+      "account": "@unknown",
+      "domain": "instagram.com",
+      "platform": "instagram",
+      "description": "",
+      "timestamp": 1776212898.563446
+    },
+    {
+      "url": "https://www.instagram.com/reel/DVUGI5Fjyad/",
+      "account": "@unknown",
+      "domain": "instagram.com",
+      "platform": "instagram",
+      "description": "",
+      "timestamp": 1776212912.0172548
+    }
+  ]
+}
