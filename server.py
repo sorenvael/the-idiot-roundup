@@ -119,19 +119,30 @@ def apply_feedback(results):
                 "just", "been", "have", "had", "has", "not", "but", "out", "all",
                 "zach", "bryan", "zachbryan", "concert", "fyp", "foryou", "viral"}
 
+    # Never treat account names as signals — accounts post about multiple events
+    own_account_words = {a.lower() for a in DEFAULT_OWN_ACCOUNTS}
+    # Also never treat these common words as signals
+    never_signal = {"stadium", "arena", "fan", "fans", "night", "show", "live",
+                    "performed", "playing", "crowd", "audience", "stage",
+                    "buccaneers", "bucs", "tampa", "raymond", "james",
+                    "com", "www", "https", "tiktok", "instagram", "youtube",
+                    "two", "one", "first", "last", "new", "old", "just",
+                    "best", "even", "back", "know", "say", "find", "you",
+                    "got", "get", "like", "love", "good", "great"}
+
     bad_words = Counter()
     for e in fb["bad"]:
         for w in re.findall(r'[a-zA-Z]{3,}', (e.get("description") or "").lower()):
-            if w not in generic:
+            if w not in generic and w not in own_account_words and w not in never_signal:
                 bad_words[w] += 1
 
     good_words = Counter()
     for e in fb["good"]:
         for w in re.findall(r'[a-zA-Z]{3,}', (e.get("description") or "").lower()):
-            if w not in generic:
+            if w not in generic and w not in own_account_words and w not in never_signal:
                 good_words[w] += 1
 
-    # Words that appear in bad but NOT in good are strong negative signals
+    # Words that appear 2+ times in bad but NOT in good are negative signals
     bad_signals = {w for w, c in bad_words.items() if c >= 2 and w not in good_words}
     good_signals = {w for w, c in good_words.items() if c >= 2 and w not in bad_words}
 
@@ -1176,8 +1187,39 @@ List every URL with the @account name. Find at least 20 results."""
                 print(f"  [step2] Web search returned no text!", file=sys.stderr)
 
             # ══════════════════════════════════════════════════════
-            # STEP 3: Vision cross-reference — scan each thumbnail
-            # Compare against what we saw in the reference thumbnail
+            # STEP 3a: Text filter — drop results obviously from wrong cities/events
+            # ══════════════════════════════════════════════════════
+            venue_lower = venue.lower() if venue else ""
+            venue_words = set()
+            if venue_lower:
+                for w in venue_lower.replace(',', ' ').split():
+                    if len(w) > 2:
+                        venue_words.add(w)
+
+            # Known wrong-city indicators — if a description mentions one of these
+            # and NONE of the venue words, it's probably from a different show
+            other_cities = {"louisville", "kentucky", "michigan", "notre dame", "atlanta",
+                           "tulsa", "oklahoma city", "nashville", "pittsburgh", "denver",
+                           "chicago", "detroit", "columbus", "stagecoach", "coachella",
+                           "big house", "ann arbor"}
+
+            before_filter = len(all_results)
+            filtered_results = []
+            for r in all_results:
+                desc = (r.get("description") or "").lower()
+                # If description mentions another city but NOT our venue, drop it
+                mentions_other = any(city in desc for city in other_cities)
+                mentions_venue = any(vw in desc for vw in venue_words) if venue_words else True
+                if mentions_other and not mentions_venue:
+                    print(f"    [filter] Dropped wrong city: {r.get('account_name','?')} — {desc[:50]}", file=sys.stderr)
+                else:
+                    filtered_results.append(r)
+            all_results = filtered_results
+            print(f"  [step3a] Text filter: {before_filter} → {len(all_results)} (dropped {before_filter - len(all_results)} wrong-city results)", file=sys.stderr)
+
+            # ══════════════════════════════════════════════════════
+            # STEP 3b: Vision cross-reference — scan remaining thumbnails
+            # Lenient check: "could this be from the same EVENT" not "same exact frame"
             # ══════════════════════════════════════════════════════
             ref_vision = ref_data.get('vision_description', '')
             thumbnails_to_scan = [r for r in all_results if r.get("thumbnail") and r.get("platform") == "tiktok"]
@@ -1201,7 +1243,7 @@ List every URL with the @account name. Find at least 20 results."""
                             json={"model": "claude-haiku-4-5-20251001", "max_tokens": 10,
                                   "messages": [{"role": "user", "content": [
                                       {"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}},
-                                      {"type": "text", "text": f"The reference video shows: {ref_vision}\n\nDoes THIS thumbnail appear to show the SAME people or the SAME event/scene? Look for the same performers, stage, or setting.\n\nRespond with exactly one word: YES, MAYBE, or NO."}
+                                      {"type": "text", "text": f"The reference video is from a concert at {venue or 'a stadium'}. It shows: {ref_vision}\n\nCould THIS thumbnail be from the SAME concert/event? It doesn't need to show the exact same moment — it could be a different angle, crowd shot, or different point in the show. Look for: similar stadium/stage setting, concert atmosphere, or any of the same performers.\n\nRespond YES if it could be from the same event, MAYBE if uncertain, NO only if it's clearly a different event or location."}
                                   ]}]},
                             timeout=30,
                         )

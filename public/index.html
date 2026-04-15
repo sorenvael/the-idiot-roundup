@@ -893,12 +893,13 @@ function markBad(url,cardEl,resultData){
   feedbackMemory.good.delete(url);
   saveFeedback();
   sendFeedback(url,resultData.account_name||'',resultData.platform||'',resultData.description||'',false);
-  // Animate out
-  cardEl.classList.add('hidden-card');
-  setTimeout(()=>cardEl.remove(),400);
+  // Dim it but don't remove — user said never block anything
+  cardEl.style.opacity='0.3';
+  const btns=cardEl.querySelectorAll('.fb-btn');
+  btns[1].classList.add('picked-bad');
 }
 
-function isKnownBad(url){return feedbackMemory.bad.has(url)}
+function isKnownBad(url){return false}  // never hide — just rank lower
 
 // ── Master account list (TikTok + Instagram) ──
 const OWN_ACCOUNTS_MASTER=[
@@ -938,9 +939,6 @@ function isOwnAccount(r){
 }
 
 function mkCard(r,ownOverride){
-  // Skip results the user previously marked bad
-  if(isKnownBad(r.url)) return null;
-
   // Detect own account client-side (works for both modes)
   const own=ownOverride||isOwnAccount(r);
 
@@ -979,9 +977,8 @@ function mkCard(r,ownOverride){
 
 function renderCards(list,id,own){
   const c=$(id);c.innerHTML='';
-  const filtered=list.filter(r=>!isKnownBad(r.url));
-  if(!filtered.length){c.innerHTML='<div style="padding:12px;text-align:center;color:#808080;font-size:11px">No matches found.</div>';return}
-  filtered.forEach(r=>{const card=mkCard(r,own);if(card)c.appendChild(card)});
+  if(!list.length){c.innerHTML='<div style="padding:12px;text-align:center;color:#808080;font-size:11px">No matches found.</div>';return}
+  list.forEach(r=>{const card=mkCard(r,own);if(card)c.appendChild(card)});
 }
 
 async function doRepost(){
