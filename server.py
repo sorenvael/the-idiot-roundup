@@ -970,7 +970,7 @@ class Handler(SimpleHTTPRequestHandler):
         pass  # old version removed
 
     def handle_event_search(self):
-        """Full multi-platform search: TikTok, Instagram, Facebook, news via Anthropic web search + Apify stats."""
+        """Same formula as Repost Finder — Anthropic web search + parse JSON results."""
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             query = body.get("query", "").strip()
@@ -979,212 +979,129 @@ class Handler(SimpleHTTPRequestHandler):
 
             if not query:
                 return self.reply({"error": "No search query"}, 400)
+            if not API_KEY:
+                return self.reply({"error": "API key not set"}, 500)
 
             cache_id = hashlib.md5(query.encode()).hexdigest()
             cached = cache_get(cache_id)
             if cached: return self.reply(cached)
 
-            seen_urls = set()
+            # ── Same approach as search_with_api (Repost Finder) ──
+            system = """You find social media videos and news articles about specific events/moments. Return ONLY a JSON array.
+Each object must have: platform (tiktok/instagram/youtube/facebook/twitter/other), account_name (@user or publication name), url (direct link), description (brief), confidence (high/medium), date_found (YYYY-MM-DD).
+Include TikTok videos, Instagram posts, YouTube videos, Facebook posts, Twitter/X posts, and news articles.
+DO NOT include ticketing sites, Spotify, setlist sites, or Wikipedia.
+Search thoroughly across all platforms. Return ONLY the JSON array, nothing else."""
+
+            prompt = f"""Find all TikTok videos, Instagram posts, YouTube videos, Facebook posts, and news articles about: {query}
+
+Search for this on every platform. Be thorough — find as many results as possible. Return as many results as you can find."""
+
+            print(f"  [step1] Web search (same as repost finder)...", file=sys.stderr)
+            text = anthropic_web_search(system, prompt, max_tokens=4096)
+            results = parse_json_results(text)
+            print(f"  [step1] Found {len(results)} results", file=sys.stderr)
+
+            # ── Enrich TikTok results with oEmbed (thumbnails + descriptions) ──
             all_results = []
+            seen = set()
+            for r in results:
+                url = r.get("url", "")
+                if not url or url in seen:
+                    continue
+                seen.add(url)
 
-            # ══════════════════════════════════════════════════════
-            # STEP 1: Anthropic web search — finds URLs across ALL platforms
-            # ══════════════════════════════════════════════════════
-            if API_KEY:
-                print(f"  [step1] Web search across all platforms...", file=sys.stderr)
-                system = """You find social media videos and news articles. Return every URL you find.
-ONLY include: TikTok videos, Instagram posts/reels, YouTube videos, Facebook posts, Twitter/X posts, news articles.
-DO NOT include: ticketing sites, Spotify, Wikipedia, setlist sites.
-For each result write the @account and full URL. Be thorough — do multiple searches."""
+                platform = r.get("platform", "other")
+                thumbnail = ""
+                account = r.get("account_name", "@unknown")
+                description = r.get("description", "")
 
-                prompt = f"""Find every TikTok, Instagram, YouTube, Facebook, and news article for: {query}
-
-Do ALL of these searches:
-1. {query} tiktok
-2. site:tiktok.com {query}
-3. {query} instagram
-4. site:instagram.com {query}
-5. {query} news
-6. {query} youtube
-7. {query} facebook
-8. {query} twitter
-
-List every URL you find with the @account name."""
-
-                text = anthropic_web_search(system, prompt)
-                if text:
-                    print(f"  [step1] Got {len(text)} chars", file=sys.stderr)
-
-                    # Extract all URLs
-                    url_pattern = r'https?://(?:www\.)?(?:tiktok\.com|instagram\.com|youtube\.com|youtu\.be|twitter\.com|x\.com|facebook\.com|[\w.-]+\.(?:com|org|net))/[^\s\)"\'<>\]]*'
-                    raw_urls = list(set(re.findall(url_pattern, text)))
-                    raw_urls = [u.rstrip('.,;:)') for u in raw_urls]
-
-                    # Filter junk domains
-                    junk = {'stubhub.com', 'seatgeek.com', 'ticketmaster.com', 'vividseats.com',
-                            'axs.com', 'setlist.fm', 'songkick.com', 'bandsintown.com',
-                            'livenation.com', 'shazam.com', 'spotify.com', 'apple.com',
-                            'genius.com', 'google.com', 'bing.com', 'wikipedia.org',
-                            'anthropic.com', 'claude.ai'}
-                    found_urls = [u for u in raw_urls if urlparse(u).netloc.lower().replace('www.','') not in junk]
-
-                    # Extract account context from text near URLs
-                    url_context = {}
-                    for m in re.finditer(r'@([\w.]+)[^\n]*?(https?://[^\s\)"\'<>\]]+)', text):
-                        url_context[m.group(2).rstrip('.,;:)')] = m.group(1)
-
-                    print(f"  [step1] Found {len(found_urls)} content URLs", file=sys.stderr)
-
-                    for url in found_urls:
-                        if url in seen_urls or '/discover/' in url or '/search/' in url:
-                            continue
-                        seen_urls.add(url)
-
-                        platform = "other"
-                        thumbnail = ""
-                        account = url_context.get(url, "")
-                        if account: account = "@" + account
-                        description = ""
-
-                        # Extract account from URL path
-                        path = urlparse(url).path
-                        url_acct = re.search(r'/@([^/]+)', path)
-                        if url_acct and not account:
-                            account = "@" + url_acct.group(1)
-
-                        if "tiktok.com" in url:
-                            platform = "tiktok"
-                            try:
-                                oembed = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(url)}", headers=HEADERS, timeout=8)
-                                if oembed.ok:
-                                    od = oembed.json()
-                                    thumbnail = od.get("thumbnail_url", "")
-                                    account = "@" + od.get("author_name", account.lstrip("@") or "unknown")
-                                    description = od.get("title", "")
-                                    print(f"    [enrich] TikTok {account}: {description[:50]}", file=sys.stderr)
-                            except Exception:
-                                pass
-                        elif "instagram.com" in url:
-                            platform = "instagram"
-                            if not account:
-                                parts = path.strip('/').split('/')
-                                if parts and parts[0] not in ('p','reel','reels','explore'):
-                                    account = "@" + parts[0]
-                        elif "youtube.com" in url or "youtu.be" in url:
-                            platform = "youtube"
-                        elif "twitter.com" in url or "x.com" in url:
-                            platform = "twitter"
-                            if not account and url_acct:
-                                account = "@" + url_acct.group(1)
-                        elif "facebook.com" in url:
-                            platform = "facebook"
-                        else:
-                            domain = urlparse(url).netloc.replace('www.','')
-                            account = domain
-                            description = domain
-
-                        all_results.append({
-                            "platform": platform,
-                            "account_name": account or "@unknown",
-                            "url": url,
-                            "description": description,
-                            "thumbnail": thumbnail,
-                            "stats": {},
-                            "vision_match": "YES",
-                        })
-
-                    print(f"  [step1] {len(all_results)} results enriched", file=sys.stderr)
-                else:
-                    print(f"  [step1] Web search returned no text!", file=sys.stderr)
-
-            # ══════════════════════════════════════════════════════
-            # STEP 2: Also search TikTok directly via Apify for stats
-            # Web search finds URLs but no stats — Apify gets the numbers
-            # ══════════════════════════════════════════════════════
-            if APIFY_TOKEN:
-                print(f"  [step2] TikTok keyword search via Apify for stats...", file=sys.stderr)
-                items = run_apify_actor("clockworks~tiktok-scraper",
-                    {"searchQueries": [query], "resultsPerPage": 50,
-                     "shouldDownloadCovers": False, "shouldDownloadVideos": False,
-                     "shouldDownloadSlideshowImages": False},
-                    label=f"search '{query}'", poll_interval=3, max_polls=30)
-
-                apify_count = 0
-                for item in items:
-                    p = parse_apify_item(item, seen_urls)
-                    if p:
-                        all_results.append(p)
-                        apify_count += 1
-                print(f"  [step2] Got {apify_count} additional from Apify (with stats)", file=sys.stderr)
-
-                # Also try to get stats for web-search TikTok URLs that don't have them
-                tiktok_no_stats = [r for r in all_results if r["platform"] == "tiktok" and not r.get("stats", {}).get("plays") and "/video/" in r["url"]]
-                if tiktok_no_stats:
-                    print(f"  [step2b] Scraping stats for {len(tiktok_no_stats)} TikTok URLs...", file=sys.stderr)
+                if "tiktok.com" in url:
+                    platform = "tiktok"
+                    # Get account from URL
+                    m = re.search(r'/@([^/]+)', url)
+                    if m and (not account or account == "@unknown"):
+                        account = "@" + m.group(1)
                     try:
-                        stat_items = run_apify_actor("clockworks~tiktok-scraper",
-                            {"postURLs": [r["url"] for r in tiktok_no_stats],
-                             "shouldDownloadCovers": False, "shouldDownloadVideos": False,
-                             "shouldDownloadSlideshowImages": False},
-                            label="stats scrape", poll_interval=3, max_polls=30)
-                        stats_map = {}
-                        for item in stat_items:
-                            vu = item.get("webVideoUrl") or item.get("videoUrl") or item.get("url") or ""
-                            if vu: stats_map[re.sub(r'\?.*$', '', vu)] = extract_stats(item)
-                        matched = 0
-                        for r in all_results:
-                            if not r.get("stats", {}).get("plays"):
-                                clean = re.sub(r'\?.*$', '', r["url"])
-                                if clean in stats_map:
-                                    r["stats"] = stats_map[clean]
-                                    matched += 1
-                        print(f"  [step2b] Got stats for {matched} videos", file=sys.stderr)
-                    except Exception as e:
-                        print(f"  [step2b] Stats scrape error: {e}", file=sys.stderr)
+                        oembed = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(url)}", headers=HEADERS, timeout=8)
+                        if oembed.ok:
+                            od = oembed.json()
+                            thumbnail = od.get("thumbnail_url", "")
+                            account = "@" + od.get("author_name", account.lstrip("@"))
+                            description = od.get("title", "") or description
+                            print(f"    [enrich] TikTok {account}: {description[:50]}", file=sys.stderr)
+                    except Exception:
+                        pass
+                elif "instagram.com" in url:
+                    platform = "instagram"
+                elif "youtube.com" in url or "youtu.be" in url:
+                    platform = "youtube"
+                elif "facebook.com" in url:
+                    platform = "facebook"
+                elif "twitter.com" in url or "x.com" in url:
+                    platform = "twitter"
+                else:
+                    domain = urlparse(url).netloc.replace('www.', '')
+                    if not account or account == "@unknown":
+                        account = domain
 
-            # ══════════════════════════════════════════════════════
-            # STEP 3: Split own vs others, tally everything
-            # ══════════════════════════════════════════════════════
+                all_results.append({
+                    "platform": platform,
+                    "account_name": account,
+                    "url": url,
+                    "description": description,
+                    "thumbnail": thumbnail,
+                    "stats": {},
+                    "vision_match": "YES",
+                })
+
+            # ── Scrape TikTok stats via Apify ──
+            tiktok_urls = [r["url"] for r in all_results if r["platform"] == "tiktok" and "/video/" in r["url"]]
+            if APIFY_TOKEN and tiktok_urls:
+                print(f"  [step2] Scraping stats for {len(tiktok_urls)} TikTok videos...", file=sys.stderr)
+                try:
+                    items = run_apify_actor("clockworks~tiktok-scraper",
+                        {"postURLs": tiktok_urls,
+                         "shouldDownloadCovers": False, "shouldDownloadVideos": False,
+                         "shouldDownloadSlideshowImages": False},
+                        label="stats", poll_interval=3, max_polls=30)
+                    stats_map = {}
+                    for item in items:
+                        vu = item.get("webVideoUrl") or item.get("videoUrl") or item.get("url") or ""
+                        if vu: stats_map[re.sub(r'\?.*$', '', vu)] = extract_stats(item)
+                    for r in all_results:
+                        clean = re.sub(r'\?.*$', '', r["url"])
+                        if clean in stats_map:
+                            r["stats"] = stats_map[clean]
+                    print(f"  [step2] Got stats for {len(stats_map)} videos", file=sys.stderr)
+                except Exception as e:
+                    print(f"  [step2] Stats error: {e}", file=sys.stderr)
+
+            # ── Split own vs others, tally ──
             own, others = split_results(all_results, DEFAULT_OWN_ACCOUNTS)
 
-            own_totals = {"plays": 0, "likes": 0, "comments": 0, "shares": 0, "count": len(own)}
-            for r in own:
-                s = r.get("stats", {})
-                own_totals["plays"] += s.get("plays", 0) or 0
-                own_totals["likes"] += s.get("likes", 0) or 0
-                own_totals["comments"] += s.get("comments", 0) or 0
-                own_totals["shares"] += s.get("shares", 0) or 0
+            def tally(lst):
+                t = {"plays": 0, "likes": 0, "comments": 0, "shares": 0, "count": len(lst)}
+                for r in lst:
+                    s = r.get("stats", {})
+                    t["plays"] += s.get("plays", 0) or 0
+                    t["likes"] += s.get("likes", 0) or 0
+                    t["comments"] += s.get("comments", 0) or 0
+                    t["shares"] += s.get("shares", 0) or 0
+                return t
 
-            other_totals = {"plays": 0, "likes": 0, "comments": 0, "shares": 0, "count": len(others)}
-            for r in others:
-                s = r.get("stats", {})
-                other_totals["plays"] += s.get("plays", 0) or 0
-                other_totals["likes"] += s.get("likes", 0) or 0
-                other_totals["comments"] += s.get("comments", 0) or 0
-                other_totals["shares"] += s.get("shares", 0) or 0
+            own_totals = tally(own)
+            other_totals = tally(others)
+            totals = {k: own_totals[k] + other_totals[k] for k in ["plays", "likes", "comments", "shares"]}
 
-            totals = {
-                "plays": own_totals["plays"] + other_totals["plays"],
-                "likes": own_totals["likes"] + other_totals["likes"],
-                "comments": own_totals["comments"] + other_totals["comments"],
-                "shares": own_totals["shares"] + other_totals["shares"],
-            }
-
-            total = len(own) + len(others)
-            print(f"  [done] {total} videos ({len(own)} own, {len(others)} others)", file=sys.stderr)
+            print(f"  [done] {len(all_results)} videos ({len(own)} own, {len(others)} others)", file=sys.stderr)
             print(f"  [stats] OUR: {own_totals}", file=sys.stderr)
             print(f"  [stats] OTHERS: {other_totals}", file=sys.stderr)
             print(f"  [stats] TOTAL: {totals}", file=sys.stderr)
             print(f"{'='*60}\n", file=sys.stderr)
 
-            response = {
-                "results": others,
-                "own_posts": own,
-                "total": total,
-                "totals": totals,
-                "own_totals": own_totals,
-                "other_totals": other_totals,
-            }
+            response = {"results": others, "own_posts": own, "total": len(all_results),
+                        "totals": totals, "own_totals": own_totals, "other_totals": other_totals}
             cache_set(cache_id, response)
             self.reply(response)
 
