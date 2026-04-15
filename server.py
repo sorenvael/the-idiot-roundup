@@ -274,21 +274,29 @@ def anthropic_web_search(system_prompt, user_prompt, model="claude-sonnet-4-2025
         block_types = [b.get("type") for b in content]
         print(f"    [api] stop_reason={stop_reason}, blocks={block_types}", file=sys.stderr)
 
-        # If stop_reason is "end_turn" or we have text, we're done
+        # Collect any text from this response
+        turn_text = "\n".join(b["text"] for b in content if b.get("type") == "text")
+
+        # If stop_reason is "end_turn", we're done
         if stop_reason == "end_turn":
-            text = "\n".join(b["text"] for b in content if b.get("type") == "text")
-            print(f"    [api] Final response: {len(text)} chars", file=sys.stderr)
-            return text
+            # Collect text from ALL turns
+            all_text = "\n".join(b["text"] for b in content if b.get("type") == "text")
+            print(f"    [api] Final response: {len(all_text)} chars", file=sys.stderr)
+            return all_text
 
-        # If stop_reason is "tool_use", we need to continue the loop
-        # Add the assistant's response (with tool_use blocks) to messages
+        # If stop_reason is "pause_turn", Claude got cut off mid-response
+        # Continue the conversation so it can finish
+        if stop_reason == "pause_turn":
+            print(f"    [api] Paused (got {len(turn_text)} chars so far), continuing...", file=sys.stderr)
+            messages.append({"role": "assistant", "content": content})
+            messages.append({"role": "user", "content": "Continue. List the remaining URLs."})
+            continue
+
+        # If stop_reason is "tool_use", handle tool results
         messages.append({"role": "assistant", "content": content})
-
-        # Build tool_result blocks for each tool_use
         tool_results = []
         for block in content:
             if block.get("type") == "tool_use":
-                # For web_search, the API handles it server-side — we just acknowledge
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block["id"],
@@ -298,9 +306,9 @@ def anthropic_web_search(system_prompt, user_prompt, model="claude-sonnet-4-2025
         if tool_results:
             messages.append({"role": "user", "content": tool_results})
         else:
-            # No tool_use blocks and not end_turn — extract whatever text we have
-            text = "\n".join(b["text"] for b in content if b.get("type") == "text")
-            return text
+            # Unknown stop reason — return whatever text we have
+            print(f"    [api] Unknown stop_reason '{stop_reason}', returning {len(turn_text)} chars", file=sys.stderr)
+            return turn_text
 
     print(f"    [api] Hit max turns ({max_turns})", file=sys.stderr)
     return ""
@@ -958,11 +966,94 @@ class Handler(SimpleHTTPRequestHandler):
             import traceback; traceback.print_exc()
             self.reply({"error": str(e)}, 500)
 
+    def handle_event_search_OLD(self):
+        pass  # old version removed
+
     def handle_event_search(self):
+        """Simple TikTok keyword search via Apify — just like searching TikTok."""
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            query = body.get("query", "").strip()
             print(f"\n{'='*60}", file=sys.stderr)
+            print(f"[event-search] Query: '{query}'", file=sys.stderr)
 
+            if not query:
+                return self.reply({"error": "No search query"}, 400)
+            if not APIFY_TOKEN:
+                return self.reply({"error": "Apify token not set"}, 500)
+
+            cache_id = hashlib.md5(query.encode()).hexdigest()
+            cached = cache_get(cache_id)
+            if cached: return self.reply(cached)
+
+            # ── Step 1: Search TikTok via Apify ──
+            print(f"  [step1] Searching TikTok for '{query}'...", file=sys.stderr)
+            items = run_apify_actor("clockworks~tiktok-scraper",
+                {"searchQueries": [query], "resultsPerPage": 50,
+                 "shouldDownloadCovers": False, "shouldDownloadVideos": False,
+                 "shouldDownloadSlideshowImages": False},
+                label=f"search '{query}'", poll_interval=3, max_polls=30)
+
+            seen = set()
+            all_results = []
+            for item in items:
+                p = parse_apify_item(item, seen)
+                if p:
+                    all_results.append(p)
+
+            print(f"  [step1] Got {len(all_results)} results", file=sys.stderr)
+
+            # ── Step 2: Split own vs others, tally stats ──
+            # Stats already come from Apify (plays, likes, comments, shares)
+            own, others = split_results(all_results, DEFAULT_OWN_ACCOUNTS)
+
+            own_totals = {"plays": 0, "likes": 0, "comments": 0, "shares": 0, "count": len(own)}
+            for r in own:
+                s = r.get("stats", {})
+                own_totals["plays"] += s.get("plays", 0) or 0
+                own_totals["likes"] += s.get("likes", 0) or 0
+                own_totals["comments"] += s.get("comments", 0) or 0
+                own_totals["shares"] += s.get("shares", 0) or 0
+
+            other_totals = {"plays": 0, "likes": 0, "comments": 0, "shares": 0, "count": len(others)}
+            for r in others:
+                s = r.get("stats", {})
+                other_totals["plays"] += s.get("plays", 0) or 0
+                other_totals["likes"] += s.get("likes", 0) or 0
+                other_totals["comments"] += s.get("comments", 0) or 0
+                other_totals["shares"] += s.get("shares", 0) or 0
+
+            totals = {
+                "plays": own_totals["plays"] + other_totals["plays"],
+                "likes": own_totals["likes"] + other_totals["likes"],
+                "comments": own_totals["comments"] + other_totals["comments"],
+                "shares": own_totals["shares"] + other_totals["shares"],
+            }
+
+            total = len(own) + len(others)
+            print(f"  [done] {total} videos ({len(own)} own, {len(others)} others)", file=sys.stderr)
+            print(f"  [stats] OUR: {own_totals}", file=sys.stderr)
+            print(f"  [stats] OTHERS: {other_totals}", file=sys.stderr)
+            print(f"  [stats] TOTAL: {totals}", file=sys.stderr)
+            print(f"{'='*60}\n", file=sys.stderr)
+
+            response = {
+                "results": others,
+                "own_posts": own,
+                "total": total,
+                "totals": totals,
+                "own_totals": own_totals,
+                "other_totals": other_totals,
+            }
+            cache_set(cache_id, response)
+            self.reply(response)
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.reply({"error": str(e)}, 500)
+    def handle_event_search_LEGACY(self):
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             cache_id = hashlib.md5(json.dumps(body, sort_keys=True).encode()).hexdigest()
             cached = cache_get(cache_id)
             if cached: return self.reply(cached)

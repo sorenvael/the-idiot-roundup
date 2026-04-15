@@ -642,26 +642,11 @@ textarea.in98{resize:vertical;min-height:40px}
           </div>
         </div>
 
-        <!-- EVENT PANEL (simplified: reference video is the source of truth) -->
+        <!-- EVENT PANEL — simple TikTok search -->
         <div class="ev-panel" id="evPanel">
-          <div class="field"><label class="lbl98">Reference Video URL:</label><input class="in98" type="text" id="evRef" placeholder="https://www.tiktok.com/@user/video/... (paste your video, app does the rest)"/></div>
-          <div class="field-row">
-            <div class="field"><label class="lbl98">Venue & City:</label><input class="in98" type="text" id="evVenue" placeholder="e.g. Raymond James Stadium, Tampa FL"/></div>
-            <div class="field"><label class="lbl98">Date:</label><input class="in98" type="date" id="evDate"/></div>
-          </div>
-          <div id="evPreview" style="display:none;margin-bottom:6px">
-            <div class="inset-dark" style="display:flex;gap:8px;align-items:center;padding:6px">
-              <img id="evThumb" style="width:60px;height:80px;object-fit:cover;border:1px solid #0f0" />
-              <div>
-                <div style="color:#0f0;font-size:11px;font-weight:700" id="evPrevAcct">@account</div>
-                <div style="color:#0f0;font-size:10px;margin-top:2px" id="evPrevDesc">Description loading...</div>
-                <div style="color:#ff0;font-size:9px;margin-top:4px" id="evPrevTags">Hashtags: ...</div>
-              </div>
-            </div>
-          </div>
+          <div class="field"><label class="lbl98">TikTok Search (same as searching TikTok):</label><input class="in98" type="text" id="evSearch" placeholder="e.g. baker mayfield zach bryan"/></div>
           <div class="btn-row">
             <button class="btn98" onclick="reset()">Clear</button>
-            <button class="btn98" id="evLoadBtn" onclick="loadRefVideo()">📡 Load Video</button>
             <button class="btn98 btn98-fire" id="evBtn" onclick="doEvent()">🔥 Find Every Angle</button>
           </div>
         </div>
@@ -1012,68 +997,37 @@ async function doRepost(){
   finally{b.disabled=false;b.textContent='🔥 Round \'em Up'}
 }
 
-// ── Reference video state ──
-let refVideoData=null;
-
-async function loadRefVideo(){
-  const url=$('evRef').value.trim();
-  if(!url)return showErr('Paste a video URL first.');
-  const btn=$('evLoadBtn');btn.disabled=true;btn.textContent='⏳ Loading...';
-  $('statusText').textContent='Loading reference video...';
-  try{
-    const resp=await fetch('/api/load-ref',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
-    const data=await resp.json();if(data.error)throw new Error(data.error);
-    refVideoData=data;
-    // Show preview
-    $('evPreview').style.display='block';
-    if(data.thumbnail_url)$('evThumb').src=data.thumbnail_url;
-    $('evPrevAcct').textContent=data.author?'@'+data.author:'@unknown';
-    $('evPrevDesc').textContent=(data.title||'No description').slice(0,100);
-    $('evPrevTags').textContent='Hashtags: '+(data.hashtags||[]).map(t=>'#'+t).join(' ');
-    if(data.vision_description){
-      $('evPrevTags').textContent+=' | AI sees: '+data.vision_description.slice(0,80);
-    }
-    $('statusText').textContent='Reference loaded'+(data.vision_description?' — AI scanned thumbnail':'');
-  }catch(e){showErr('Could not load video: '+e.message)}
-  finally{btn.disabled=false;btn.textContent='📡 Load Video'}
-}
-
 async function doEvent(){
-  const refUrl=$('evRef').value.trim();
-  if(!refUrl)return showErr('Paste a reference video URL first.');
-  const venue=$('evVenue').value.trim();
-  const date=$('evDate').value;
+  const query=$('evSearch').value.trim();
+  if(!query)return showErr('Type a search query first.');
 
-  const b=$('evBtn');b.disabled=true;b.textContent='⏳ Scanning...';
+  const b=$('evBtn');b.disabled=true;b.textContent='⏳ Searching...';
   reset();
   $('prog').classList.add('vis');$('how').style.display='none';
   $('progLog').innerHTML='';
-  $('statusText').textContent='Scanning...';
-  addLog('roundup_scan.exe --mode=event --ref="'+refUrl.slice(0,50)+'..."');
-  addLog('Loading reference video metadata...','active');setBar(5);
-  $('progStatus').textContent='Loading reference...';
+  $('statusText').textContent='Searching TikTok...';
+  addLog('roundup_scan.exe --mode=tiktok --query="'+query+'"');
+  addLog('Searching TikTok for "'+query+'"...','active');setBar(10);
+  $('progStatus').textContent='Searching TikTok...';
 
-  const t1=setTimeout(()=>{addLog('Reference loaded. Searching web for matching videos...','done');addLog('AI web search in progress...','active');setBar(20);$('progStatus').textContent='AI searching web...'},5000);
-  const t2=setTimeout(()=>{addLog('Web search complete. Searching hashtags on TikTok...','done');addLog('Scraping hashtag feeds...','active');setBar(40);$('progStatus').textContent='Searching hashtags...'},15000);
-  const t3=setTimeout(()=>{addLog('Hashtags scraped. Vision matching thumbnails...','done');addLog('Comparing thumbnails to reference...','active');setBar(60);$('progStatus').textContent='Vision matching...'},30000);
-  const t4=setTimeout(()=>{addLog('Vision match done. Scraping our accounts...','done');addLog('Scanning 36 accounts...','active');setBar(75);$('progStatus').textContent='Scraping our network...'},45000);
-  const t5=setTimeout(()=>{addLog('Almost done. Tallying stats...','active');setBar(90);$('progStatus').textContent='Tallying stats...'},60000);
+  const t1=setTimeout(()=>{addLog('Scraping results...','active');setBar(40);$('progStatus').textContent='Scraping...'},8000);
+  const t2=setTimeout(()=>{addLog('Getting video stats...','active');setBar(70);$('progStatus').textContent='Getting stats...'},20000);
 
   try{
     const resp=await fetch('/api/event-search',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({ref_video:refUrl,venue,date,ref_data:refVideoData||null})});
-    [t1,t2,t3,t4,t5].forEach(clearTimeout);
+      body:JSON.stringify({query})});
+    [t1,t2].forEach(clearTimeout);
     const data=await resp.json();if(data.error)throw new Error(data.error);
     const res=data.results||[],own=data.own_posts||[],totals=data.totals||{},total=res.length+own.length;
     const ownTotals=data.own_totals||{};
     setBar(100);
     addLog('=================================','done');
-    addLog('SCAN COMPLETE: '+total+' total matches found.','done');
+    addLog('SCAN COMPLETE: '+total+' videos found.','done');
     addLog('OUR NETWORK: '+own.length+' posts, '+fmt(ownTotals.plays||0)+' views','done');
-    addLog('OTHER ANGLES: '+res.length+' posts','done');
-    addLog('COMBINED REACH: '+fmt(totals.plays||0)+' views','done');
-    $('progStatus').textContent='Complete - '+total+' matches found';
-    $('statusText').textContent=total+' matches ('+own.length+' ours, '+res.length+' others)';
+    addLog('OTHER ANGLES: '+res.length+' posts, '+fmt((totals.plays||0)-(ownTotals.plays||0))+' views','done');
+    addLog('COMBINED: '+fmt(totals.plays||0)+' views, '+fmt(totals.likes||0)+' likes','done');
+    $('progStatus').textContent='Complete - '+total+' videos';
+    $('statusText').textContent=total+' videos ('+own.length+' ours, '+res.length+' others)';
 
     $('iV').textContent=total;$('iP').textContent=fmt(totals.plays||0);$('iL').textContent=fmt(totals.likes||0);$('iS').textContent=fmt(totals.shares||0);
     $('iReach').textContent=fmt(totals.plays||0);$('iVids').textContent=total;$('impact').classList.add('vis');
@@ -1086,7 +1040,7 @@ async function doEvent(){
       $('ownSec').classList.add('vis');$('ownCt').textContent=own.length+' posts found';renderCards(own,'ownCards',true);
     }
     $('resSec').classList.add('vis');$('resTitle').textContent='Other Angles';$('resCt').textContent=res.length+' match'+(res.length!==1?'es':'');renderCards(res,'resCards',false);
-  }catch(e){[t1,t2,t3,t4,t5].forEach(clearTimeout);showErr(e.message);addLog('ERROR: '+e.message,'err');$('progStatus').textContent='Failed'}
+  }catch(e){[t1,t2].forEach(clearTimeout);showErr(e.message);addLog('ERROR: '+e.message,'err');$('progStatus').textContent='Failed'}
   finally{b.disabled=false;b.textContent='🔥 Find Every Angle'}
 }
 $('urlInput').addEventListener('keydown',e=>{if(e.key==='Enter')doRepost()});
