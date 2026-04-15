@@ -898,6 +898,32 @@ class Handler(SimpleHTTPRequestHandler):
                 except Exception as e:
                     print(f"  [load-ref] YouTube oEmbed failed: {e}", file=sys.stderr)
 
+            # ── Vision scan: actually look at the thumbnail ──
+            if result["thumbnail_url"] and API_KEY:
+                print(f"  [load-ref] Scanning thumbnail with vision AI...", file=sys.stderr)
+                b64 = download_thumbnail(result["thumbnail_url"])
+                if b64:
+                    try:
+                        mt = "image/webp" if ".webp" in result["thumbnail_url"].lower() else "image/jpeg"
+                        vr = requests.post(
+                            "https://api.anthropic.com/v1/messages",
+                            headers={"x-api-key": API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 300,
+                                  "messages": [{"role": "user", "content": [
+                                      {"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}},
+                                      {"type": "text", "text": "Describe exactly what you see in this image. Who are the people? What are they doing? What's the setting? Be specific about identifying features, clothing, and the scene. Keep it to 2-3 sentences."}
+                                  ]}]},
+                            timeout=30,
+                        )
+                        if vr.status_code == 200:
+                            vision_desc = vr.json().get("content", [{}])[0].get("text", "").strip()
+                            result["vision_description"] = vision_desc
+                            print(f"  [load-ref] Vision: {vision_desc}", file=sys.stderr)
+                        else:
+                            print(f"  [load-ref] Vision API {vr.status_code}", file=sys.stderr)
+                    except Exception as e:
+                        print(f"  [load-ref] Vision error: {e}", file=sys.stderr)
+
             self.reply(result)
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -1150,9 +1176,78 @@ List every URL with the @account name. Find at least 20 results."""
                 print(f"  [step2] Web search returned no text!", file=sys.stderr)
 
             # ══════════════════════════════════════════════════════
-            # STEP 3: Scrape TikTok URLs via Apify for real stats
+            # STEP 3: Vision cross-reference — scan each thumbnail
+            # Compare against what we saw in the reference thumbnail
+            # ══════════════════════════════════════════════════════
+            ref_vision = ref_data.get('vision_description', '')
+            thumbnails_to_scan = [r for r in all_results if r.get("thumbnail") and r.get("platform") == "tiktok"]
+
+            if ref_vision and API_KEY and thumbnails_to_scan:
+                print(f"  [step3] Vision cross-referencing {len(thumbnails_to_scan)} thumbnails...", file=sys.stderr)
+                print(f"  [step3] Reference scene: {ref_vision[:80]}", file=sys.stderr)
+
+                def vision_compare(r):
+                    thumb_url = r.get("thumbnail", "")
+                    if not thumb_url:
+                        return r, "NO_THUMB"
+                    b64 = download_thumbnail(thumb_url)
+                    if not b64:
+                        return r, "DL_FAIL"
+                    mt = "image/webp" if ".webp" in thumb_url.lower() else "image/jpeg"
+                    try:
+                        resp = requests.post(
+                            "https://api.anthropic.com/v1/messages",
+                            headers={"x-api-key": API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 10,
+                                  "messages": [{"role": "user", "content": [
+                                      {"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}},
+                                      {"type": "text", "text": f"The reference video shows: {ref_vision}\n\nDoes THIS thumbnail appear to show the SAME people or the SAME event/scene? Look for the same performers, stage, or setting.\n\nRespond with exactly one word: YES, MAYBE, or NO."}
+                                  ]}]},
+                            timeout=30,
+                        )
+                        if resp.status_code == 200:
+                            return r, resp.json().get("content", [{}])[0].get("text", "").strip().upper()
+                        elif resp.status_code == 429:
+                            return r, "RATE_LIMITED"
+                        else:
+                            return r, "SKIP"
+                    except Exception:
+                        return r, "SKIP"
+
+                # Scan with limited concurrency to avoid rate limits
+                scanned = 0
+                for r in thumbnails_to_scan:
+                    if scanned >= 15:  # cap at 15 vision calls per search
+                        print(f"  [step3] Hit vision cap (15), stopping", file=sys.stderr)
+                        break
+                    result_item, verdict = vision_compare(r)
+                    acct = result_item.get("account_name", "?")
+                    if verdict in ("YES", "MAYBE"):
+                        result_item["vision_match"] = verdict
+                        print(f"  [step3] ✓ {verdict}: {acct}", file=sys.stderr)
+                    elif verdict == "NO":
+                        result_item["vision_match"] = "NO"
+                        print(f"  [step3] ✗ NO: {acct}", file=sys.stderr)
+                    elif verdict == "RATE_LIMITED":
+                        print(f"  [step3] ⚠ Rate limited, stopping vision", file=sys.stderr)
+                        break
+                    else:
+                        result_item["vision_match"] = "UNKNOWN"
+                    scanned += 1
+                    time.sleep(0.5)  # small delay between calls
+
+                print(f"  [step3] Scanned {scanned} thumbnails", file=sys.stderr)
+            else:
+                if not ref_vision:
+                    print(f"  [step3] No vision description from reference — skipping cross-reference", file=sys.stderr)
+
+            # ══════════════════════════════════════════════════════
+            # STEP 4: Scrape TikTok URLs via Apify for real stats
+            # Only scrape videos that passed vision (YES/MAYBE/UNKNOWN)
             # oEmbed doesn't return views/likes — Apify does
             # ══════════════════════════════════════════════════════
+            # Filter out vision NO results before stats scrape
+            all_results = [r for r in all_results if r.get("vision_match", "UNKNOWN") != "NO"]
             tiktok_urls = [r["url"] for r in all_results if r.get("platform") == "tiktok" and "/video/" in r.get("url", "")]
             if APIFY_TOKEN and tiktok_urls:
                 print(f"  [step3] Scraping stats for {len(tiktok_urls)} TikTok URLs via Apify...", file=sys.stderr)

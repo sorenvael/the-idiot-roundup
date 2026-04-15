@@ -1033,7 +1033,10 @@ async function loadRefVideo(){
     $('evPrevAcct').textContent=data.author?'@'+data.author:'@unknown';
     $('evPrevDesc').textContent=(data.title||'No description').slice(0,100);
     $('evPrevTags').textContent='Hashtags: '+(data.hashtags||[]).map(t=>'#'+t).join(' ');
-    $('statusText').textContent='Reference loaded — ready to scan';
+    if(data.vision_description){
+      $('evPrevTags').textContent+=' | AI sees: '+data.vision_description.slice(0,80);
+    }
+    $('statusText').textContent='Reference loaded'+(data.vision_description?' — AI scanned thumbnail':'');
   }catch(e){showErr('Could not load video: '+e.message)}
   finally{btn.disabled=false;btn.textContent='📡 Load Video'}
 }
