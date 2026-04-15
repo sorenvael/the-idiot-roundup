@@ -619,11 +619,26 @@ class Handler(SimpleHTTPRequestHandler):
                                      label=f"profiles batch {i//10+1}", poll_interval=3, max_polls=25)
                     found = 0
                     for item in items:
-                        vid_url = item.get("webVideoUrl") or item.get("videoUrl") or item.get("url") or ""
-                        desc = (item.get("text") or item.get("desc") or "").lower()
+                        # Get author name
                         author = (item.get("authorMeta", {}).get("name", "") or
                                   item.get("author", {}).get("uniqueId", "") or
-                                  item.get("authorName", "") or "").lower()
+                                  item.get("authorName", "") or item.get("uniqueId", "") or "").lower()
+
+                        # Build URL from video ID + author (more reliable than Apify's URL fields)
+                        vid_id = str(item.get("id") or item.get("videoId") or "")
+                        vid_url = item.get("webVideoUrl") or item.get("videoUrl") or item.get("url") or ""
+
+                        # If we have a full video ID (19 digits), construct the URL ourselves
+                        if vid_id and len(vid_id) >= 18 and author:
+                            vid_url = f"https://www.tiktok.com/@{author}/video/{vid_id}"
+                        elif vid_url:
+                            # Check if the URL's video ID is truncated
+                            m = re.search(r"/video/(\d+)", vid_url)
+                            if m and len(m.group(1)) < 18 and vid_id and len(vid_id) >= 18:
+                                vid_url = re.sub(r"/video/\d+", f"/video/{vid_id}", vid_url)
+
+                        desc = (item.get("text") or item.get("desc") or "").lower()
+
                         # Check if this post matches the reference video topic
                         if vid_url and any(t in desc for t in match_terms):
                             raw_results.append({
