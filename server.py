@@ -1131,6 +1131,52 @@ class Handler(SimpleHTTPRequestHandler):
             results = search_with_api(url, platform or "tiktok", meta)
             print(f"  [step1] Found {len(results)} results", file=sys.stderr)
 
+            # ── Step 1b: Search our own accounts on TikTok for this moment ──
+            if APIFY_TOKEN and meta.get("title"):
+                # Extract keywords from the reference video title (without hashtags)
+                title_clean = re.sub(r'#\w+', '', meta.get("title", "")).strip()
+                # Use first few meaningful words as search terms
+                search_words = [w for w in title_clean.split() if len(w) > 2][:4]
+                search_term = ' '.join(search_words) if search_words else title_clean[:30]
+
+                # Search key accounts — batch into groups to limit Apify calls
+                key_accounts = [
+                    'zachbryanarchive', 'oklahomanoutlaw', 'greatamericanbarscene',
+                    'morezachbryan', 'americanharddrive', 'withheavenontok',
+                    'ellalangleyarchive', 'langleyloyalists', 'morejoshuaslone',
+                    'ole60archive', 'philkanehq', 'gabriellarosearchive',
+                    'roadshowrecap', 'barnburners', 'harleycarmichael',
+                ]
+                print(f"  [step1b] Searching {len(key_accounts)} own accounts for '{search_term}'...", file=sys.stderr)
+
+                for acct in key_accounts:
+                    query = f"{acct} {search_term}"
+                    try:
+                        items = run_apify_actor("clockworks~tiktok-scraper",
+                            {"searchQueries": [query], "resultsPerPage": 5,
+                             "shouldDownloadCovers": False, "shouldDownloadVideos": False,
+                             "shouldDownloadSlideshowImages": False},
+                            label=f"@{acct}", poll_interval=2, max_polls=10)
+                        for item in items:
+                            # Only keep if it's actually from this account
+                            author = (item.get("authorMeta", {}).get("name", "") or
+                                      item.get("author", {}).get("uniqueId", "") or
+                                      item.get("authorName", "") or "").lower()
+                            if acct.lower() in author:
+                                video_url = item.get("webVideoUrl") or item.get("videoUrl") or item.get("url") or ""
+                                if video_url:
+                                    results.append({
+                                        "platform": "tiktok",
+                                        "account_name": f"@{author}",
+                                        "url": video_url,
+                                        "description": (item.get("text") or item.get("desc") or "")[:200],
+                                    })
+                                    print(f"    [found] @{author}: {(item.get('text') or '')[:40]}", file=sys.stderr)
+                    except Exception as e:
+                        print(f"    [@{acct}] failed: {e}", file=sys.stderr)
+
+                print(f"  [step1b] Total results after own account search: {len(results)}", file=sys.stderr)
+
             # ── Step 2: Build result objects, detect platform from URL ──
             all_results = []
             seen = {url}
