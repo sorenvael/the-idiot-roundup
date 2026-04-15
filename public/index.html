@@ -642,9 +642,9 @@ textarea.in98{resize:vertical;min-height:40px}
           </div>
         </div>
 
-        <!-- EVENT PANEL — simple TikTok search -->
+        <!-- EVENT PANEL — paste a video, find all reposts across all platforms -->
         <div class="ev-panel" id="evPanel">
-          <div class="field"><label class="lbl98">TikTok Search (same as searching TikTok):</label><input class="in98" type="text" id="evSearch" placeholder="e.g. baker mayfield zach bryan"/></div>
+          <div class="field"><label class="lbl98">Reference Video URL:</label><input class="in98" type="text" id="evRef" placeholder="https://www.tiktok.com/@user/video/... or any video URL"/></div>
           <div class="btn-row">
             <button class="btn98" onclick="reset()">Clear</button>
             <button class="btn98 btn98-fire" id="evBtn" onclick="doEvent()">🔥 Find Every Angle</button>
@@ -998,36 +998,38 @@ async function doRepost(){
 }
 
 async function doEvent(){
-  const query=$('evSearch').value.trim();
-  if(!query)return showErr('Type a search query first.');
+  const url=$('evRef').value.trim();
+  if(!url)return showErr('Paste a video URL first.');
+  const plat=/tiktok/i.test(url)?'tiktok':/instagram/i.test(url)?'instagram':/youtu/i.test(url)?'youtube':'other';
 
-  const b=$('evBtn');b.disabled=true;b.textContent='⏳ Searching...';
+  const b=$('evBtn');b.disabled=true;b.textContent='⏳ Scanning...';
   reset();
   $('prog').classList.add('vis');$('how').style.display='none';
   $('progLog').innerHTML='';
-  $('statusText').textContent='Searching TikTok...';
-  addLog('roundup_scan.exe --mode=tiktok --query="'+query+'"');
-  addLog('Searching TikTok for "'+query+'"...','active');setBar(10);
-  $('progStatus').textContent='Searching TikTok...';
+  $('statusText').textContent='Scanning all platforms...';
+  addLog('roundup_scan.exe --mode=event --url='+url.slice(0,50)+'...');
+  addLog('Extracting metadata...','active');setBar(5);
+  $('progStatus').textContent='Loading video...';
 
-  const t1=setTimeout(()=>{addLog('Scraping results...','active');setBar(40);$('progStatus').textContent='Scraping...'},8000);
-  const t2=setTimeout(()=>{addLog('Getting video stats...','active');setBar(70);$('progStatus').textContent='Getting stats...'},20000);
+  const t1=setTimeout(()=>{addLog('Metadata ready. Searching all platforms...','done');addLog('Searching TikTok, Instagram, YouTube, Facebook, news...','active');setBar(20);$('progStatus').textContent='Searching all platforms...'},3000);
+  const t2=setTimeout(()=>{addLog('Scanning results...','active');setBar(50);$('progStatus').textContent='Finding reposts...'},15000);
+  const t3=setTimeout(()=>{addLog('Getting stats...','active');setBar(75);$('progStatus').textContent='Scraping stats...'},30000);
 
   try{
     const resp=await fetch('/api/event-search',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({query})});
-    [t1,t2].forEach(clearTimeout);
+      body:JSON.stringify({url,platform:plat})});
+    [t1,t2,t3].forEach(clearTimeout);
     const data=await resp.json();if(data.error)throw new Error(data.error);
     const res=data.results||[],own=data.own_posts||[],totals=data.totals||{},total=res.length+own.length;
     const ownTotals=data.own_totals||{};
     setBar(100);
     addLog('=================================','done');
-    addLog('SCAN COMPLETE: '+total+' videos found.','done');
+    addLog('SCAN COMPLETE: '+total+' results found.','done');
     addLog('OUR NETWORK: '+own.length+' posts, '+fmt(ownTotals.plays||0)+' views','done');
-    addLog('OTHER ANGLES: '+res.length+' posts, '+fmt((totals.plays||0)-(ownTotals.plays||0))+' views','done');
+    addLog('OTHER ANGLES: '+res.length+' posts','done');
     addLog('COMBINED: '+fmt(totals.plays||0)+' views, '+fmt(totals.likes||0)+' likes','done');
-    $('progStatus').textContent='Complete - '+total+' videos';
-    $('statusText').textContent=total+' videos ('+own.length+' ours, '+res.length+' others)';
+    $('progStatus').textContent='Complete - '+total+' results';
+    $('statusText').textContent=total+' results ('+own.length+' ours, '+res.length+' others)';
 
     $('iV').textContent=total;$('iP').textContent=fmt(totals.plays||0);$('iL').textContent=fmt(totals.likes||0);$('iS').textContent=fmt(totals.shares||0);
     $('iReach').textContent=fmt(totals.plays||0);$('iVids').textContent=total;$('impact').classList.add('vis');
@@ -1040,7 +1042,7 @@ async function doEvent(){
       $('ownSec').classList.add('vis');$('ownCt').textContent=own.length+' posts found';renderCards(own,'ownCards',true);
     }
     $('resSec').classList.add('vis');$('resTitle').textContent='Other Angles';$('resCt').textContent=res.length+' match'+(res.length!==1?'es':'');renderCards(res,'resCards',false);
-  }catch(e){[t1,t2].forEach(clearTimeout);showErr(e.message);addLog('ERROR: '+e.message,'err');$('progStatus').textContent='Failed'}
+  }catch(e){[t1,t2,t3].forEach(clearTimeout);showErr(e.message);addLog('ERROR: '+e.message,'err');$('progStatus').textContent='Failed'}
   finally{b.disabled=false;b.textContent='🔥 Find Every Angle'}
 }
 $('urlInput').addEventListener('keydown',e=>{if(e.key==='Enter')doRepost()});

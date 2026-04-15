@@ -970,100 +970,80 @@ class Handler(SimpleHTTPRequestHandler):
         pass  # old version removed
 
     def handle_event_search(self):
-        """Same formula as Repost Finder — Anthropic web search + parse JSON results."""
+        """Same as handle_search (Repost Finder) but with own/other split and stats."""
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-            query = body.get("query", "").strip()
+            url = body.get("url", "").strip()
+            platform = body.get("platform", "")
             print(f"\n{'='*60}", file=sys.stderr)
-            print(f"[event-search] Query: '{query}'", file=sys.stderr)
+            print(f"[event-search] URL: {url[:60]}", file=sys.stderr)
 
-            if not query:
-                return self.reply({"error": "No search query"}, 400)
+            if not url:
+                return self.reply({"error": "No URL"}, 400)
             if not API_KEY:
                 return self.reply({"error": "API key not set"}, 500)
 
-            cache_id = hashlib.md5(query.encode()).hexdigest()
+            cache_id = hashlib.md5(url.encode()).hexdigest() + "_event"
             cached = cache_get(cache_id)
             if cached: return self.reply(cached)
 
-            # ── Same approach as search_with_api (Repost Finder) ──
-            system = """You find social media videos and news articles about specific events/moments. Return ONLY a JSON array.
-Each object must have: platform (tiktok/instagram/youtube/facebook/twitter/other), account_name (@user or publication name), url (direct link), description (brief), confidence (high/medium), date_found (YYYY-MM-DD).
-Include TikTok videos, Instagram posts, YouTube videos, Facebook posts, Twitter/X posts, and news articles.
-DO NOT include ticketing sites, Spotify, setlist sites, or Wikipedia.
-Search thoroughly across all platforms. Return ONLY the JSON array, nothing else."""
+            # ── Step 1: Get metadata (same as repost finder) ──
+            meta = get_metadata(url, platform or "tiktok")
+            print(f"  [meta] Title: {meta.get('title','')[:60]}, Author: {meta.get('author','')}", file=sys.stderr)
 
-            prompt = f"""Find all TikTok videos, Instagram posts, YouTube videos, Facebook posts, and news articles about: {query}
-
-Search for this on every platform. Be thorough — find as many results as possible. Return as many results as you can find."""
-
-            print(f"  [step1] Web search (same as repost finder)...", file=sys.stderr)
-            text = anthropic_web_search(system, prompt, max_tokens=4096)
-            results = parse_json_results(text)
+            # ── Step 2: Search for reposts (same function as repost finder) ──
+            print(f"  [step1] Searching all platforms for reposts...", file=sys.stderr)
+            results = search_with_api(url, platform or "tiktok", meta)
             print(f"  [step1] Found {len(results)} results", file=sys.stderr)
 
-            # ── Enrich TikTok results with oEmbed (thumbnails + descriptions) ──
+            # ── Step 3: Enrich with oEmbed ──
             all_results = []
-            seen = set()
+            seen = {url}  # exclude the reference video itself
             for r in results:
-                url = r.get("url", "")
-                if not url or url in seen:
+                rurl = r.get("url", "")
+                if not rurl or rurl in seen:
                     continue
-                seen.add(url)
+                seen.add(rurl)
 
-                platform = r.get("platform", "other")
+                rplat = r.get("platform", "other")
                 thumbnail = ""
                 account = r.get("account_name", "@unknown")
                 description = r.get("description", "")
 
-                if "tiktok.com" in url:
-                    platform = "tiktok"
-                    # Get account from URL
-                    m = re.search(r'/@([^/]+)', url)
+                if "tiktok.com" in rurl:
+                    rplat = "tiktok"
+                    m = re.search(r'/@([^/]+)', rurl)
                     if m and (not account or account == "@unknown"):
                         account = "@" + m.group(1)
                     try:
-                        oembed = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(url)}", headers=HEADERS, timeout=8)
+                        oembed = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(rurl)}", headers=HEADERS, timeout=8)
                         if oembed.ok:
                             od = oembed.json()
                             thumbnail = od.get("thumbnail_url", "")
                             account = "@" + od.get("author_name", account.lstrip("@"))
                             description = od.get("title", "") or description
-                            print(f"    [enrich] TikTok {account}: {description[:50]}", file=sys.stderr)
+                            print(f"    [enrich] {account}: {description[:50]}", file=sys.stderr)
                     except Exception:
                         pass
-                elif "instagram.com" in url:
-                    platform = "instagram"
-                elif "youtube.com" in url or "youtu.be" in url:
-                    platform = "youtube"
-                elif "facebook.com" in url:
-                    platform = "facebook"
-                elif "twitter.com" in url or "x.com" in url:
-                    platform = "twitter"
+                elif "instagram.com" in rurl: rplat = "instagram"
+                elif "youtube.com" in rurl or "youtu.be" in rurl: rplat = "youtube"
+                elif "facebook.com" in rurl: rplat = "facebook"
+                elif "twitter.com" in rurl or "x.com" in rurl: rplat = "twitter"
                 else:
-                    domain = urlparse(url).netloc.replace('www.', '')
-                    if not account or account == "@unknown":
-                        account = domain
+                    domain = urlparse(rurl).netloc.replace('www.', '')
+                    if not account or account == "@unknown": account = domain
 
-                all_results.append({
-                    "platform": platform,
-                    "account_name": account,
-                    "url": url,
-                    "description": description,
-                    "thumbnail": thumbnail,
-                    "stats": {},
-                    "vision_match": "YES",
-                })
+                all_results.append({"platform": rplat, "account_name": account, "url": rurl,
+                    "description": description, "thumbnail": thumbnail, "stats": {}, "vision_match": "YES"})
 
-            # ── Scrape TikTok stats via Apify ──
+            # ── Step 4: Scrape TikTok stats ──
             tiktok_urls = [r["url"] for r in all_results if r["platform"] == "tiktok" and "/video/" in r["url"]]
             if APIFY_TOKEN and tiktok_urls:
                 print(f"  [step2] Scraping stats for {len(tiktok_urls)} TikTok videos...", file=sys.stderr)
                 try:
                     items = run_apify_actor("clockworks~tiktok-scraper",
-                        {"postURLs": tiktok_urls,
-                         "shouldDownloadCovers": False, "shouldDownloadVideos": False,
-                         "shouldDownloadSlideshowImages": False},
+                        {"postURLs": tiktok_urls, "shouldDownloadCovers": False,
+                         "shouldDownloadVideos": False, "shouldDownloadSlideshowImages": False},
                         label="stats", poll_interval=3, max_polls=30)
                     stats_map = {}
                     for item in items:
@@ -1071,36 +1051,29 @@ Search for this on every platform. Be thorough — find as many results as possi
                         if vu: stats_map[re.sub(r'\?.*$', '', vu)] = extract_stats(item)
                     for r in all_results:
                         clean = re.sub(r'\?.*$', '', r["url"])
-                        if clean in stats_map:
-                            r["stats"] = stats_map[clean]
+                        if clean in stats_map: r["stats"] = stats_map[clean]
                     print(f"  [step2] Got stats for {len(stats_map)} videos", file=sys.stderr)
                 except Exception as e:
                     print(f"  [step2] Stats error: {e}", file=sys.stderr)
 
-            # ── Split own vs others, tally ──
+            # ── Step 5: Split own vs others, tally ──
             own, others = split_results(all_results, DEFAULT_OWN_ACCOUNTS)
-
             def tally(lst):
                 t = {"plays": 0, "likes": 0, "comments": 0, "shares": 0, "count": len(lst)}
                 for r in lst:
                     s = r.get("stats", {})
-                    t["plays"] += s.get("plays", 0) or 0
-                    t["likes"] += s.get("likes", 0) or 0
-                    t["comments"] += s.get("comments", 0) or 0
-                    t["shares"] += s.get("shares", 0) or 0
+                    for k in ["plays","likes","comments","shares"]: t[k] += s.get(k, 0) or 0
                 return t
-
             own_totals = tally(own)
             other_totals = tally(others)
-            totals = {k: own_totals[k] + other_totals[k] for k in ["plays", "likes", "comments", "shares"]}
+            totals = {k: own_totals[k] + other_totals[k] for k in ["plays","likes","comments","shares"]}
 
-            print(f"  [done] {len(all_results)} videos ({len(own)} own, {len(others)} others)", file=sys.stderr)
+            print(f"  [done] {len(all_results)} results ({len(own)} own, {len(others)} others)", file=sys.stderr)
             print(f"  [stats] OUR: {own_totals}", file=sys.stderr)
-            print(f"  [stats] OTHERS: {other_totals}", file=sys.stderr)
             print(f"  [stats] TOTAL: {totals}", file=sys.stderr)
             print(f"{'='*60}\n", file=sys.stderr)
 
-            response = {"results": others, "own_posts": own, "total": len(all_results),
+            response = {"metadata": meta, "results": others, "own_posts": own, "total": len(all_results),
                         "totals": totals, "own_totals": own_totals, "other_totals": other_totals}
             cache_set(cache_id, response)
             self.reply(response)
