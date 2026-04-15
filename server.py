@@ -52,13 +52,12 @@ CACHE_TTL = 24 * 60 * 60
 FEEDBACK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feedback.json")
 
 def load_feedback():
-    """Load feedback from disk. Returns {good: {url: {data}}, bad: {url: {data}}, bad_domains: {domain: count}, bad_accounts: {account: count}}"""
-    default = {"good": {}, "bad": {}, "bad_domains": {}, "bad_accounts": {}}
+    """Load feedback from disk. Stores good/bad examples with descriptions for pattern learning."""
+    default = {"good": [], "bad": []}
     if os.path.exists(FEEDBACK_FILE):
         try:
             with open(FEEDBACK_FILE) as f:
                 data = json.load(f)
-            # Ensure all keys exist
             for k in default:
                 if k not in data:
                     data[k] = default[k]
@@ -68,70 +67,105 @@ def load_feedback():
     return default
 
 def save_feedback(fb):
-    """Save feedback to disk."""
     with open(FEEDBACK_FILE, "w") as f:
         json.dump(fb, f, indent=2)
 
 def record_feedback(url, account, domain, platform, description, is_good):
-    """Record a feedback event and update learned patterns."""
+    """Record feedback — stores the full context so the system can learn patterns."""
     fb = load_feedback()
     entry = {"url": url, "account": account, "domain": domain, "platform": platform,
              "description": description, "timestamp": time.time()}
 
-    if is_good:
-        fb["good"][url] = entry
-        fb["bad"].pop(url, None)  # remove from bad if was there
-    else:
-        fb["bad"][url] = entry
-        fb["good"].pop(url, None)
-        # Learn: track bad domains and accounts
-        if domain and platform == "other":
-            fb["bad_domains"][domain] = fb["bad_domains"].get(domain, 0) + 1
-        if account and account != "@unknown":
-            acct = account.lstrip("@").lower()
-            fb["bad_accounts"][acct] = fb["bad_accounts"].get(acct, 0) + 1
+    target = fb["good"] if is_good else fb["bad"]
+    # Don't duplicate
+    if not any(e["url"] == url for e in target):
+        target.append(entry)
+    # If it was in the other list, remove it
+    other = fb["bad"] if is_good else fb["good"]
+    fb["bad" if is_good else "good"] = [e for e in other if e["url"] != url]
 
     save_feedback(fb)
-    total_good = len(fb["good"])
-    total_bad = len(fb["bad"])
-    bad_domains = {k: v for k, v in fb["bad_domains"].items() if v >= 2}
-    bad_accounts = {k: v for k, v in fb["bad_accounts"].items() if v >= 2}
-    print(f"  [feedback] {'GOOD' if is_good else 'BAD'}: {account} {url[:50]}", file=sys.stderr)
-    print(f"  [feedback] Totals: {total_good} good, {total_bad} bad, {len(bad_domains)} blocked domains, {len(bad_accounts)} blocked accounts", file=sys.stderr)
+    print(f"  [feedback] {'GOOD' if is_good else 'BAD'}: {account} — {description[:60]}", file=sys.stderr)
+    print(f"  [feedback] Totals: {len(fb['good'])} good examples, {len(fb['bad'])} bad examples", file=sys.stderr)
+
+    # Extract what makes bad results bad (learn patterns)
+    if not is_good and fb["bad"]:
+        bad_descriptions = [e["description"] for e in fb["bad"] if e.get("description")]
+        if bad_descriptions:
+            # Extract common words from bad descriptions (excluding generic terms)
+            from collections import Counter
+            generic = {"the", "a", "an", "in", "on", "at", "to", "for", "of", "and", "is", "was",
+                        "this", "that", "with", "from", "his", "her", "he", "she", "it", "my",
+                        "just", "been", "have", "had", "has", "not", "but", "out", "all",
+                        "zach", "bryan", "zachbryan", "concert", "fyp", "foryou", "viral"}
+            words = []
+            for d in bad_descriptions:
+                for w in re.findall(r'[a-zA-Z]{3,}', d.lower()):
+                    if w not in generic:
+                        words.append(w)
+            common_bad = Counter(words).most_common(10)
+            print(f"  [feedback] Learned bad patterns: {common_bad}", file=sys.stderr)
 
 def apply_feedback(results):
-    """Filter results using learned feedback. Remove URLs marked bad, domains/accounts with 2+ bad marks."""
+    """Score results using learned feedback. Bad-pattern matches get ranked lower, not removed."""
     fb = load_feedback()
-    bad_urls = set(fb["bad"].keys())
-    # Block domains with 2+ bad marks
-    blocked_domains = {d for d, c in fb["bad_domains"].items() if c >= 2}
-    # Block accounts with 2+ bad marks
-    blocked_accounts = {a for a, c in fb["bad_accounts"].items() if c >= 2}
-
-    if not bad_urls and not blocked_domains and not blocked_accounts:
+    if not fb["bad"] and not fb["good"]:
         return results
 
-    kept = []
-    dropped = 0
-    for r in results:
+    # Build pattern words from bad examples
+    from collections import Counter
+    generic = {"the", "a", "an", "in", "on", "at", "to", "for", "of", "and", "is", "was",
+                "this", "that", "with", "from", "his", "her", "he", "she", "it", "my",
+                "just", "been", "have", "had", "has", "not", "but", "out", "all",
+                "zach", "bryan", "zachbryan", "concert", "fyp", "foryou", "viral"}
+
+    bad_words = Counter()
+    for e in fb["bad"]:
+        for w in re.findall(r'[a-zA-Z]{3,}', (e.get("description") or "").lower()):
+            if w not in generic:
+                bad_words[w] += 1
+
+    good_words = Counter()
+    for e in fb["good"]:
+        for w in re.findall(r'[a-zA-Z]{3,}', (e.get("description") or "").lower()):
+            if w not in generic:
+                good_words[w] += 1
+
+    # Words that appear in bad but NOT in good are strong negative signals
+    bad_signals = {w for w, c in bad_words.items() if c >= 2 and w not in good_words}
+    good_signals = {w for w, c in good_words.items() if c >= 2 and w not in bad_words}
+
+    if bad_signals:
+        print(f"  [feedback] Bad signals: {bad_signals}", file=sys.stderr)
+    if good_signals:
+        print(f"  [feedback] Good signals: {good_signals}", file=sys.stderr)
+
+    # Exact bad URLs always go to the bottom
+    bad_urls = {e["url"] for e in fb["bad"]}
+
+    # Score and sort — bad-pattern matches go to the bottom, good matches to the top
+    def score(r):
         url = r.get("url", "")
-        account = r.get("account_name", "").lstrip("@").lower()
-        domain = urlparse(url).netloc.lower().replace("www.", "")
+        desc = (r.get("description") or "").lower()
+        words = set(re.findall(r'[a-zA-Z]{3,}', desc))
 
         if url in bad_urls:
-            dropped += 1
-            continue
-        if domain in blocked_domains:
-            dropped += 1
-            continue
-        if account in blocked_accounts and account not in {a.lower() for a in DEFAULT_OWN_ACCOUNTS}:
-            dropped += 1
-            continue
-        kept.append(r)
+            return -100  # exact bad URL — bottom
 
-    if dropped:
-        print(f"  [feedback] Filtered out {dropped} results based on learned feedback", file=sys.stderr)
-    return kept
+        s = 0
+        s += len(words & good_signals) * 10   # good signal words boost
+        s -= len(words & bad_signals) * 10     # bad signal words penalize
+        return s
+
+    results.sort(key=score, reverse=True)
+
+    # Log what happened
+    if bad_signals or good_signals:
+        top3 = [(r.get("account_name","?"), score(r)) for r in results[:3]]
+        bot3 = [(r.get("account_name","?"), score(r)) for r in results[-3:]]
+        print(f"  [feedback] Top 3: {top3}, Bottom 3: {bot3}", file=sys.stderr)
+
+    return results
 
 def cache_key(url):
     normalized = re.sub(r'\?.*$', '', url).rstrip('/').lower()
@@ -804,8 +838,6 @@ class Handler(SimpleHTTPRequestHandler):
                 "ok": True,
                 "total_good": len(fb["good"]),
                 "total_bad": len(fb["bad"]),
-                "blocked_domains": [d for d, c in fb["bad_domains"].items() if c >= 2],
-                "blocked_accounts": [a for a, c in fb["bad_accounts"].items() if c >= 2],
             })
         except Exception as e:
             self.reply({"error": str(e)}, 500)
