@@ -677,7 +677,8 @@ class Handler(SimpleHTTPRequestHandler):
 
             log(f"  [step2b] Total results after profile scrape: {len(raw_results)}")
 
-        # Step 3: Enrich each result (detect platform, get oEmbed data, extract real account)
+        # Step 3: Enrich each result
+        # Profile-scraped results already have all data — skip enrichment for them
         seen = {url}  # skip the reference video itself
         enriched = []
         for r in raw_results:
@@ -688,11 +689,16 @@ class Handler(SimpleHTTPRequestHandler):
             domain = urlparse(rurl).netloc.lower().replace("www.", "")
             if domain in JUNK_DOMAINS:
                 continue
-            # Skip non-content pages
             if "/discover/" in rurl or "/search/" in rurl or "/explore/" in rurl:
                 continue
             seen.add(rurl)
-            enriched.append(enrich_result(rurl))
+
+            if r.get("_from_profile"):
+                # Already enriched by Apify — keep as-is
+                enriched.append(r)
+            else:
+                # Web search result — enrich with oEmbed
+                enriched.append(enrich_result(rurl))
 
         log(f"  [step2] Enriched {len(enriched)} results")
 
