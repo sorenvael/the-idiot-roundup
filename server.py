@@ -48,6 +48,91 @@ DEFAULT_OWN_ACCOUNTS = {
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 CACHE_TTL = 24 * 60 * 60
 
+# ── Feedback store (persists to disk, survives restarts) ─────
+FEEDBACK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feedback.json")
+
+def load_feedback():
+    """Load feedback from disk. Returns {good: {url: {data}}, bad: {url: {data}}, bad_domains: {domain: count}, bad_accounts: {account: count}}"""
+    default = {"good": {}, "bad": {}, "bad_domains": {}, "bad_accounts": {}}
+    if os.path.exists(FEEDBACK_FILE):
+        try:
+            with open(FEEDBACK_FILE) as f:
+                data = json.load(f)
+            # Ensure all keys exist
+            for k in default:
+                if k not in data:
+                    data[k] = default[k]
+            return data
+        except Exception:
+            pass
+    return default
+
+def save_feedback(fb):
+    """Save feedback to disk."""
+    with open(FEEDBACK_FILE, "w") as f:
+        json.dump(fb, f, indent=2)
+
+def record_feedback(url, account, domain, platform, description, is_good):
+    """Record a feedback event and update learned patterns."""
+    fb = load_feedback()
+    entry = {"url": url, "account": account, "domain": domain, "platform": platform,
+             "description": description, "timestamp": time.time()}
+
+    if is_good:
+        fb["good"][url] = entry
+        fb["bad"].pop(url, None)  # remove from bad if was there
+    else:
+        fb["bad"][url] = entry
+        fb["good"].pop(url, None)
+        # Learn: track bad domains and accounts
+        if domain and platform == "other":
+            fb["bad_domains"][domain] = fb["bad_domains"].get(domain, 0) + 1
+        if account and account != "@unknown":
+            acct = account.lstrip("@").lower()
+            fb["bad_accounts"][acct] = fb["bad_accounts"].get(acct, 0) + 1
+
+    save_feedback(fb)
+    total_good = len(fb["good"])
+    total_bad = len(fb["bad"])
+    bad_domains = {k: v for k, v in fb["bad_domains"].items() if v >= 2}
+    bad_accounts = {k: v for k, v in fb["bad_accounts"].items() if v >= 2}
+    print(f"  [feedback] {'GOOD' if is_good else 'BAD'}: {account} {url[:50]}", file=sys.stderr)
+    print(f"  [feedback] Totals: {total_good} good, {total_bad} bad, {len(bad_domains)} blocked domains, {len(bad_accounts)} blocked accounts", file=sys.stderr)
+
+def apply_feedback(results):
+    """Filter results using learned feedback. Remove URLs marked bad, domains/accounts with 2+ bad marks."""
+    fb = load_feedback()
+    bad_urls = set(fb["bad"].keys())
+    # Block domains with 2+ bad marks
+    blocked_domains = {d for d, c in fb["bad_domains"].items() if c >= 2}
+    # Block accounts with 2+ bad marks
+    blocked_accounts = {a for a, c in fb["bad_accounts"].items() if c >= 2}
+
+    if not bad_urls and not blocked_domains and not blocked_accounts:
+        return results
+
+    kept = []
+    dropped = 0
+    for r in results:
+        url = r.get("url", "")
+        account = r.get("account_name", "").lstrip("@").lower()
+        domain = urlparse(url).netloc.lower().replace("www.", "")
+
+        if url in bad_urls:
+            dropped += 1
+            continue
+        if domain in blocked_domains:
+            dropped += 1
+            continue
+        if account in blocked_accounts and account not in {a.lower() for a in DEFAULT_OWN_ACCOUNTS}:
+            dropped += 1
+            continue
+        kept.append(r)
+
+    if dropped:
+        print(f"  [feedback] Filtered out {dropped} results based on learned feedback", file=sys.stderr)
+    return kept
+
 def cache_key(url):
     normalized = re.sub(r'\?.*$', '', url).rstrip('/').lower()
     return hashlib.md5(normalized.encode()).hexdigest()
@@ -697,7 +782,33 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/api/search": self.handle_search()
         elif self.path == "/api/load-ref": self.handle_load_ref()
         elif self.path == "/api/event-search": self.handle_event_search()
+        elif self.path == "/api/feedback": self.handle_feedback()
         else: self.send_error(404)
+
+    def handle_feedback(self):
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            url = body.get("url", "")
+            account = body.get("account", "")
+            domain = body.get("domain", "")
+            platform = body.get("platform", "")
+            description = body.get("description", "")
+            is_good = body.get("good", False)
+
+            if not url:
+                return self.reply({"error": "No URL"}, 400)
+
+            record_feedback(url, account, domain, platform, description, is_good)
+            fb = load_feedback()
+            self.reply({
+                "ok": True,
+                "total_good": len(fb["good"]),
+                "total_bad": len(fb["bad"]),
+                "blocked_domains": [d for d, c in fb["bad_domains"].items() if c >= 2],
+                "blocked_accounts": [a for a, c in fb["bad_accounts"].items() if c >= 2],
+            })
+        except Exception as e:
+            self.reply({"error": str(e)}, 500)
 
     def handle_load_ref(self):
         """Load reference video metadata: thumbnail, title, author, hashtags."""
@@ -834,79 +945,161 @@ class Handler(SimpleHTTPRequestHandler):
             venue_short = venue.split(',')[0].strip() if venue else ''
             title_clean = re.sub(r'#\w+', '', ref_title).strip()
 
-            system = f"""You find TikTok, Instagram, YouTube videos and news articles about a SPECIFIC event.
-ONLY return results from {venue or 'this specific event'}{f' on or around {date}' if date else ''}.
-REJECT any result from a different city, venue, or date.
-Return ONLY a JSON array. Each object must have: platform, account_name, url, description, confidence, date_found."""
+            # Key own accounts to search for specifically
+            key_accounts = ['oklahomanoutlaw', 'greatamericanbarscene', 'zachbryanarchive',
+                            'morezachbryan', 'americanharddrive', 'withheavenontok']
 
-            prompt = f"""Find every TikTok, Instagram, YouTube video and news article about this SPECIFIC moment:
+            system = """You are a social media researcher. Search the web and list every URL you find. ONLY include these types of results:
+- TikTok video links
+- Instagram video/post links
+- YouTube video links
+- News articles about the event
 
-REFERENCE: {ref_url}
-TITLE: {ref_title}
-AUTHOR: @{ref_author}
-VENUE: {venue}
-DATE: {date}
+DO NOT include ticketing sites, setlist sites, Spotify, or any non-content URLs. List each URL on its own line. Be thorough — do multiple searches."""
 
-Do MULTIPLE web searches to find as many results as possible:
-1. Search: {hashtag_str} {venue_short} tiktok
-2. Search: "{title_clean[:40]}" {venue_short}
-3. Search: site:tiktok.com {' '.join(ref_hashtags[:2])} {venue_short}
-4. Search: {venue_short} {' '.join(ref_hashtags)} instagram
-5. Search: {venue_short} {' '.join(ref_hashtags)} news coverage
+            prompt = f"""Find every video and article about this event:
 
-For each result include the DIRECT URL to the video or article.
-ONLY include results from {venue}. Do NOT include results from other shows or cities.
-Return the JSON array with ALL results you found."""
+- {ref_title}
+- Venue: {venue}
+- Date: {date}
+
+Search for:
+1. {' '.join(ref_hashtags[:2])} {venue_short} tiktok
+2. site:tiktok.com {' '.join(ref_hashtags[:2])} {venue_short}
+3. {title_clean[:40]} {venue_short} instagram
+4. {' '.join(ref_hashtags)} {venue_short} news
+
+Also search for these specific accounts posting about this event:
+5. oklahomanoutlaw {venue_short} {ref_hashtags[0] if ref_hashtags else ''}
+6. zachbryanarchive {venue_short} {ref_hashtags[0] if ref_hashtags else ''}
+
+List every URL you find. Include the full URL for each result."""
 
             text = anthropic_web_search(system, prompt)
             if text:
-                web_results = parse_json_results(text)
-                print(f"  [step2] Parsed {len(web_results)} results from web search", file=sys.stderr)
+                print(f"  [step2] Got {len(text)} chars from web search", file=sys.stderr)
+                print(f"  [step2] Preview: {text[:300]}", file=sys.stderr)
 
-                # Enrich TikTok URLs with oEmbed for thumbnails/descriptions
-                for wr in web_results:
-                    url = wr.get("url", "")
-                    if not url or url in seen_urls:
+                # ── Extract URLs from response — only social media + news ──
+                url_pattern = r'https?://(?:www\.)?(?:tiktok\.com|instagram\.com|youtube\.com|youtu\.be|twitter\.com|x\.com|facebook\.com|[\w.-]+\.(?:com|org|net))/[^\s\)"\'<>\]]*'
+                raw_urls = list(set(re.findall(url_pattern, text)))
+                raw_urls = [u.rstrip('.,;:)') for u in raw_urls]
+
+                # Filter out junk domains (ticketing, seating, setlists, etc)
+                junk_domains = {'stubhub.com', 'seatgeek.com', 'ticketmaster.com', 'vividseats.com',
+                                'axs.com', 'setlist.fm', 'songkick.com', 'bandsintown.com',
+                                'livenation.com', 'shazam.com', 'spotify.com', 'apple.com',
+                                'genius.com', 'google.com', 'bing.com', 'wikipedia.org',
+                                'anthropic.com', 'claude.ai'}
+                found_urls = []
+                for u in raw_urls:
+                    domain = urlparse(u).netloc.lower().replace('www.', '')
+                    if domain not in junk_domains:
+                        found_urls.append(u)
+                    else:
+                        print(f"    [filter] Skipped junk: {domain}", file=sys.stderr)
+
+                print(f"  [step2] Extracted {len(found_urls)} content URLs ({len(raw_urls) - len(found_urls)} junk filtered)", file=sys.stderr)
+
+                # Also try JSON parsing in case Claude returned structured data
+                json_results = parse_json_results(text)
+                for jr in json_results:
+                    u = jr.get("url", "")
+                    if u and u not in found_urls:
+                        found_urls.append(u)
+
+                # ── Enrich each URL with oEmbed ──
+                for url in found_urls:
+                    if url in seen_urls:
+                        continue
+                    # Skip non-content URLs (search pages, discover pages, etc)
+                    if '/discover/' in url or '/search/' in url or '/explore/' in url:
                         continue
                     seen_urls.add(url)
 
-                    platform = wr.get("platform", "other")
+                    platform = "other"
                     thumbnail = ""
+                    account = "@unknown"
+                    description = ""
+
+                    # ── Extract account name from URL as fallback ──
+                    def account_from_url(u):
+                        """Extract @username from URL path."""
+                        path = urlparse(u).path
+                        # TikTok: /@username/video/123
+                        m = re.search(r'/@([^/]+)', path)
+                        if m: return "@" + m.group(1)
+                        # Instagram: /username/ or /p/xxx/ (can't get user from /p/ URLs)
+                        parts = path.strip('/').split('/')
+                        if parts and parts[0] not in ('p', 'reel', 'reels', 'tv', 'stories', 'explore'):
+                            return "@" + parts[0]
+                        return None
 
                     if "tiktok.com" in url:
                         platform = "tiktok"
+                        # Get account from URL first as fallback
+                        url_account = account_from_url(url)
+                        if url_account:
+                            account = url_account
                         try:
                             oembed = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(url)}", headers=HEADERS, timeout=8)
                             if oembed.ok:
                                 od = oembed.json()
                                 thumbnail = od.get("thumbnail_url", "")
-                                if not wr.get("account_name") or wr["account_name"] == "@unknown":
-                                    wr["account_name"] = "@" + od.get("author_name", "unknown")
-                                if not wr.get("description"):
-                                    wr["description"] = od.get("title", "")
+                                account = "@" + od.get("author_name", account.lstrip("@"))
+                                description = od.get("title", "")
+                                print(f"    [enrich] TikTok {account}: {description[:50]}", file=sys.stderr)
+                            else:
+                                print(f"    [enrich] TikTok oEmbed {oembed.status_code}, using URL: {account}", file=sys.stderr)
+                        except Exception as e:
+                            print(f"    [enrich] TikTok error: {e}, using URL: {account}", file=sys.stderr)
+                    elif "instagram.com" in url:
+                        platform = "instagram"
+                        url_account = account_from_url(url)
+                        if url_account:
+                            account = url_account
+                        try:
+                            oembed = requests.get(f"https://api.instagram.com/oembed/?url={quote_plus(url)}", headers=HEADERS, timeout=8)
+                            if oembed.ok:
+                                od = oembed.json()
+                                thumbnail = od.get("thumbnail_url", "")
+                                account = "@" + od.get("author_name", account.lstrip("@"))
+                                description = od.get("title", "")
+                                print(f"    [enrich] Instagram {account}: {description[:50]}", file=sys.stderr)
                         except Exception:
-                            pass
-                    elif "instagram.com" in url: platform = "instagram"
-                    elif "youtube.com" in url or "youtu.be" in url: platform = "youtube"
+                            print(f"    [enrich] Instagram oEmbed failed, using URL: {account}", file=sys.stderr)
+                    elif "youtube.com" in url or "youtu.be" in url:
+                        platform = "youtube"
+                    elif "twitter.com" in url or "x.com" in url:
+                        platform = "twitter"
+                        url_account = account_from_url(url)
+                        if url_account:
+                            account = url_account
+                    else:
+                        # News article — use domain as account name
+                        platform = "other"
+                        domain = urlparse(url).netloc.replace('www.', '')
+                        account = domain
+                        description = domain
 
                     all_results.append({
                         "platform": platform,
-                        "account_name": wr.get("account_name", "@unknown"),
+                        "account_name": account,
                         "url": url,
-                        "description": wr.get("description", ""),
+                        "description": description,
                         "thumbnail": thumbnail,
                         "stats": {},
                         "vision_match": "YES",
                     })
 
-                print(f"  [step2] {len(all_results)} results after enrichment", file=sys.stderr)
+                print(f"  [step2] {len(all_results)} total results after enrichment", file=sys.stderr)
             else:
                 print(f"  [step2] Web search returned no text!", file=sys.stderr)
 
             # ══════════════════════════════════════════════════════
-            # STEP 3: Split own vs others, tally stats
-            # No more Apify, no more vision, no more profile scraping
+            # STEP 3: Apply learned feedback, then split own vs others
             # ══════════════════════════════════════════════════════
+            all_results = apply_feedback(all_results)
             own, others = split_results(all_results, DEFAULT_OWN_ACCOUNTS)
 
             own_totals = {"plays": 0, "likes": 0, "comments": 0, "shares": 0, "count": len(own)}

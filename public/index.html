@@ -865,19 +865,34 @@ function saveFeedback(){
   }catch(e){}
 }
 
-function markGood(url,cardEl){
+function sendFeedback(url,account,platform,description,isGood){
+  // Extract domain from url
+  let domain='';
+  try{domain=new URL(url).hostname.replace('www.','');}catch(e){}
+  // Send to server (fire and forget)
+  fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({url,account,domain,platform,description,good:isGood})
+  }).then(r=>r.json()).then(d=>{
+    if(d.blocked_domains&&d.blocked_domains.length) console.log('Blocked domains:',d.blocked_domains);
+    if(d.blocked_accounts&&d.blocked_accounts.length) console.log('Blocked accounts:',d.blocked_accounts);
+  }).catch(()=>{});
+}
+
+function markGood(url,cardEl,resultData){
   feedbackMemory.good.add(url);
   feedbackMemory.bad.delete(url);
   saveFeedback();
+  sendFeedback(url,resultData.account_name||'',resultData.platform||'',resultData.description||'',true);
   const btns=cardEl.querySelectorAll('.fb-btn');
   btns[0].classList.add('picked');
   btns[1].classList.remove('picked-bad');
 }
 
-function markBad(url,cardEl){
+function markBad(url,cardEl,resultData){
   feedbackMemory.bad.add(url);
   feedbackMemory.good.delete(url);
   saveFeedback();
+  sendFeedback(url,resultData.account_name||'',resultData.platform||'',resultData.description||'',false);
   // Animate out
   cardEl.classList.add('hidden-card');
   setTimeout(()=>cardEl.remove(),400);
@@ -956,8 +971,8 @@ function mkCard(r,ownOverride){
 
   // Feedback button handlers
   const btns=card.querySelectorAll('.fb-btn');
-  btns[0].addEventListener('click',e=>{e.stopPropagation();markGood(r.url,card)});
-  btns[1].addEventListener('click',e=>{e.stopPropagation();markBad(r.url,card)});
+  btns[0].addEventListener('click',e=>{e.stopPropagation();markGood(r.url,card,r)});
+  btns[1].addEventListener('click',e=>{e.stopPropagation();markBad(r.url,card,r)});
 
   return card;
 }
