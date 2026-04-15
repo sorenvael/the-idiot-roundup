@@ -383,6 +383,141 @@ def extract_stats(item):
         "shares": pick(item, stats_obj, "shareCount", "shares"),
     }
 
+# ── URL verification ─────────────────────────────────────────
+def verify_url(url, timeout=8):
+    """Check if a URL is real by sending a HEAD request. Returns True if it exists."""
+    try:
+        r = requests.head(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+        return r.status_code < 400
+    except Exception:
+        try:
+            # Some sites block HEAD, try GET with stream
+            r = requests.get(url, headers=HEADERS, timeout=timeout, stream=True, allow_redirects=True)
+            r.close()
+            return r.status_code < 400
+        except Exception:
+            return False
+
+def verify_urls_parallel(results, max_workers=5):
+    """Verify all URLs in parallel. Returns only results with real URLs."""
+    if not results:
+        return []
+    print(f"  [verify] Checking {len(results)} URLs...", file=sys.stderr)
+    verified = []
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(verify_url, r["url"]): r for r in results}
+        for future in as_completed(futures):
+            r = futures[future]
+            try:
+                is_real = future.result()
+                if is_real:
+                    verified.append(r)
+                else:
+                    print(f"    [verify] DEAD: {r['url'][:60]}", file=sys.stderr)
+            except Exception:
+                pass
+    print(f"  [verify] {len(verified)}/{len(results)} URLs verified real", file=sys.stderr)
+    return verified
+
+
+# ── Multi-platform stats scraping ────────────────────────────
+def scrape_instagram_stats(urls):
+    """Scrape Instagram post stats via Apify. Returns {url: {plays, likes, comments, shares}}."""
+    if not APIFY_TOKEN or not urls:
+        return {}
+    print(f"  [ig-stats] Scraping {len(urls)} Instagram posts...", file=sys.stderr)
+    try:
+        items = run_apify_actor("apify~instagram-post-scraper",
+            {"directUrls": urls, "resultsLimit": len(urls)},
+            label="ig-stats", poll_interval=3, max_polls=30)
+        stats = {}
+        for item in items:
+            post_url = item.get("url") or item.get("inputUrl") or ""
+            if post_url:
+                stats[post_url] = {
+                    "plays": item.get("videoPlayCount", 0) or item.get("videoViewCount", 0) or 0,
+                    "likes": item.get("likesCount", 0) or 0,
+                    "comments": item.get("commentsCount", 0) or 0,
+                    "shares": 0,  # Instagram doesn't expose shares via scraping
+                }
+                # Also grab the real account name and description
+                owner = item.get("ownerUsername") or item.get("ownerFullName") or ""
+                if owner:
+                    stats[post_url]["_account"] = "@" + owner
+                caption = item.get("caption") or ""
+                if caption:
+                    stats[post_url]["_description"] = caption[:200]
+        print(f"  [ig-stats] Got stats for {len(stats)} posts", file=sys.stderr)
+        return stats
+    except Exception as e:
+        print(f"  [ig-stats] Error: {e}", file=sys.stderr)
+        return {}
+
+def scrape_twitter_stats(urls):
+    """Scrape Twitter/X tweet stats via Apify. Returns {url: {plays, likes, comments, shares}}."""
+    if not APIFY_TOKEN or not urls:
+        return {}
+    print(f"  [tw-stats] Scraping {len(urls)} tweets...", file=sys.stderr)
+    try:
+        items = run_apify_actor("datapilot~tweet-twitter-x-scraper",
+            {"urls": urls, "maxItems": len(urls)},
+            label="tw-stats", poll_interval=3, max_polls=30)
+        stats = {}
+        for item in items:
+            tweet_url = item.get("url") or item.get("tweetUrl") or ""
+            if tweet_url:
+                stats[tweet_url] = {
+                    "plays": item.get("viewCount", 0) or item.get("views", 0) or 0,
+                    "likes": item.get("likeCount", 0) or item.get("likes", 0) or 0,
+                    "comments": item.get("replyCount", 0) or item.get("replies", 0) or 0,
+                    "shares": item.get("retweetCount", 0) or item.get("retweets", 0) or 0,
+                }
+                author = item.get("author", {})
+                if isinstance(author, dict):
+                    username = author.get("userName") or author.get("screen_name") or ""
+                    if username:
+                        stats[tweet_url]["_account"] = "@" + username
+                text = item.get("text") or item.get("full_text") or ""
+                if text:
+                    stats[tweet_url]["_description"] = text[:200]
+        print(f"  [tw-stats] Got stats for {len(stats)} tweets", file=sys.stderr)
+        return stats
+    except Exception as e:
+        print(f"  [tw-stats] Error: {e}", file=sys.stderr)
+        return {}
+
+def scrape_facebook_stats(urls):
+    """Scrape Facebook post stats via Apify. Returns {url: {plays, likes, comments, shares}}."""
+    if not APIFY_TOKEN or not urls:
+        return {}
+    print(f"  [fb-stats] Scraping {len(urls)} Facebook posts...", file=sys.stderr)
+    try:
+        items = run_apify_actor("apify~facebook-posts-scraper",
+            {"startUrls": [{"url": u} for u in urls], "resultsLimit": len(urls)},
+            label="fb-stats", poll_interval=3, max_polls=30)
+        stats = {}
+        for item in items:
+            post_url = item.get("url") or item.get("postUrl") or ""
+            if post_url:
+                stats[post_url] = {
+                    "plays": item.get("videoViewCount", 0) or 0,
+                    "likes": item.get("likesCount", 0) or item.get("reactionsCount", 0) or 0,
+                    "comments": item.get("commentsCount", 0) or 0,
+                    "shares": item.get("sharesCount", 0) or 0,
+                }
+                author = item.get("pageName") or item.get("userName") or ""
+                if author:
+                    stats[post_url]["_account"] = author
+                text = item.get("text") or item.get("message") or ""
+                if text:
+                    stats[post_url]["_description"] = text[:200]
+        print(f"  [fb-stats] Got stats for {len(stats)} posts", file=sys.stderr)
+        return stats
+    except Exception as e:
+        print(f"  [fb-stats] Error: {e}", file=sys.stderr)
+        return {}
+
+
 def parse_apify_item(item, seen_urls):
     video_url = item.get("webVideoUrl") or item.get("videoUrl") or item.get("url") or ""
     if not video_url or video_url in seen_urls:
@@ -996,65 +1131,116 @@ class Handler(SimpleHTTPRequestHandler):
             results = search_with_api(url, platform or "tiktok", meta)
             print(f"  [step1] Found {len(results)} results", file=sys.stderr)
 
-            # ── Step 3: Enrich with oEmbed ──
+            # ── Step 2: Build result objects, detect platform from URL ──
             all_results = []
-            seen = {url}  # exclude the reference video itself
+            seen = {url}
             for r in results:
                 rurl = r.get("url", "")
                 if not rurl or rurl in seen:
                     continue
                 seen.add(rurl)
 
-                rplat = r.get("platform", "other")
-                thumbnail = ""
-                account = r.get("account_name", "@unknown")
-                description = r.get("description", "")
-
+                # Detect platform from URL — never trust Claude's guess
+                rplat = "other"
+                account = ""
                 if "tiktok.com" in rurl:
                     rplat = "tiktok"
                     m = re.search(r'/@([^/]+)', rurl)
-                    if m and (not account or account == "@unknown"):
-                        account = "@" + m.group(1)
-                    try:
-                        oembed = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(rurl)}", headers=HEADERS, timeout=8)
-                        if oembed.ok:
-                            od = oembed.json()
-                            thumbnail = od.get("thumbnail_url", "")
-                            account = "@" + od.get("author_name", account.lstrip("@"))
-                            description = od.get("title", "") or description
-                            print(f"    [enrich] {account}: {description[:50]}", file=sys.stderr)
-                    except Exception:
-                        pass
-                elif "instagram.com" in rurl: rplat = "instagram"
+                    if m: account = "@" + m.group(1)
+                elif "instagram.com" in rurl:
+                    rplat = "instagram"
+                    parts = urlparse(rurl).path.strip('/').split('/')
+                    if parts and parts[0] not in ('p','reel','reels','explore','tv','stories'):
+                        account = "@" + parts[0]
                 elif "youtube.com" in rurl or "youtu.be" in rurl: rplat = "youtube"
                 elif "facebook.com" in rurl: rplat = "facebook"
-                elif "twitter.com" in rurl or "x.com" in rurl: rplat = "twitter"
+                elif "twitter.com" in rurl or "x.com" in rurl:
+                    rplat = "twitter"
+                    m = re.search(r'/([^/]+)/status/', rurl)
+                    if m: account = "@" + m.group(1)
                 else:
-                    domain = urlparse(rurl).netloc.replace('www.', '')
-                    if not account or account == "@unknown": account = domain
+                    account = urlparse(rurl).netloc.replace('www.', '')
 
-                all_results.append({"platform": rplat, "account_name": account, "url": rurl,
-                    "description": description, "thumbnail": thumbnail, "stats": {}, "vision_match": "YES"})
+                all_results.append({"platform": rplat, "account_name": account or rplat.title() + " Post",
+                    "url": rurl, "description": "", "thumbnail": "", "stats": {}})
 
-            # ── Step 4: Scrape TikTok stats ──
+            # ── Step 3: Verify URLs are real ──
+            all_results = verify_urls_parallel(all_results)
+
+            # ── Step 4: Scrape stats + real data from each platform via Apify ──
+            # Group URLs by platform
             tiktok_urls = [r["url"] for r in all_results if r["platform"] == "tiktok" and "/video/" in r["url"]]
-            if APIFY_TOKEN and tiktok_urls:
-                print(f"  [step2] Scraping stats for {len(tiktok_urls)} TikTok videos...", file=sys.stderr)
-                try:
-                    items = run_apify_actor("clockworks~tiktok-scraper",
-                        {"postURLs": tiktok_urls, "shouldDownloadCovers": False,
-                         "shouldDownloadVideos": False, "shouldDownloadSlideshowImages": False},
-                        label="stats", poll_interval=3, max_polls=30)
-                    stats_map = {}
-                    for item in items:
-                        vu = item.get("webVideoUrl") or item.get("videoUrl") or item.get("url") or ""
-                        if vu: stats_map[re.sub(r'\?.*$', '', vu)] = extract_stats(item)
-                    for r in all_results:
-                        clean = re.sub(r'\?.*$', '', r["url"])
-                        if clean in stats_map: r["stats"] = stats_map[clean]
-                    print(f"  [step2] Got stats for {len(stats_map)} videos", file=sys.stderr)
-                except Exception as e:
-                    print(f"  [step2] Stats error: {e}", file=sys.stderr)
+            ig_urls = [r["url"] for r in all_results if r["platform"] == "instagram"]
+            tw_urls = [r["url"] for r in all_results if r["platform"] == "twitter" and "/status/" in r["url"]]
+            fb_urls = [r["url"] for r in all_results if r["platform"] == "facebook"]
+
+            # TikTok: oEmbed for thumbnails + Apify for stats
+            if tiktok_urls:
+                print(f"  [step4] Enriching {len(tiktok_urls)} TikTok videos...", file=sys.stderr)
+                # oEmbed for thumbnails + descriptions
+                for r in all_results:
+                    if r["platform"] != "tiktok": continue
+                    try:
+                        oembed = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(r['url'])}", headers=HEADERS, timeout=8)
+                        if oembed.ok:
+                            od = oembed.json()
+                            r["thumbnail"] = od.get("thumbnail_url", "")
+                            r["account_name"] = "@" + od.get("author_name", r["account_name"].lstrip("@"))
+                            r["description"] = od.get("title", "")
+                    except Exception:
+                        pass
+                # Apify for stats
+                if APIFY_TOKEN:
+                    try:
+                        items = run_apify_actor("clockworks~tiktok-scraper",
+                            {"postURLs": tiktok_urls, "shouldDownloadCovers": False,
+                             "shouldDownloadVideos": False, "shouldDownloadSlideshowImages": False},
+                            label="tk-stats", poll_interval=3, max_polls=30)
+                        stats_map = {}
+                        for item in items:
+                            vu = item.get("webVideoUrl") or item.get("videoUrl") or item.get("url") or ""
+                            if vu: stats_map[re.sub(r'\?.*$', '', vu)] = extract_stats(item)
+                        for r in all_results:
+                            clean = re.sub(r'\?.*$', '', r["url"])
+                            if clean in stats_map: r["stats"] = stats_map[clean]
+                        print(f"  [step4] TikTok stats: {len(stats_map)} videos", file=sys.stderr)
+                    except Exception as e:
+                        print(f"  [step4] TikTok stats error: {e}", file=sys.stderr)
+
+            # Instagram stats
+            if ig_urls:
+                ig_stats = scrape_instagram_stats(ig_urls)
+                for r in all_results:
+                    if r["platform"] == "instagram" and r["url"] in ig_stats:
+                        s = ig_stats[r["url"]]
+                        r["stats"] = {k: v for k, v in s.items() if not k.startswith("_")}
+                        if s.get("_account"): r["account_name"] = s["_account"]
+                        if s.get("_description"): r["description"] = s["_description"]
+
+            # Twitter stats
+            if tw_urls:
+                tw_stats = scrape_twitter_stats(tw_urls)
+                for r in all_results:
+                    if r["platform"] == "twitter" and r["url"] in tw_stats:
+                        s = tw_stats[r["url"]]
+                        r["stats"] = {k: v for k, v in s.items() if not k.startswith("_")}
+                        if s.get("_account"): r["account_name"] = s["_account"]
+                        if s.get("_description"): r["description"] = s["_description"]
+
+            # Facebook stats
+            if fb_urls:
+                fb_stats = scrape_facebook_stats(fb_urls)
+                for r in all_results:
+                    if r["platform"] == "facebook" and r["url"] in fb_stats:
+                        s = fb_stats[r["url"]]
+                        r["stats"] = {k: v for k, v in s.items() if not k.startswith("_")}
+                        if s.get("_account"): r["account_name"] = s["_account"]
+                        if s.get("_description"): r["description"] = s["_description"]
+
+            # News articles — use domain as account, URL as description
+            for r in all_results:
+                if r["platform"] == "other" and not r["description"]:
+                    r["description"] = urlparse(r["url"]).netloc.replace('www.', '')
 
             # ── Step 5: Split own vs others, tally ──
             own, others = split_results(all_results, DEFAULT_OWN_ACCOUNTS)
