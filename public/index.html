@@ -645,6 +645,7 @@ textarea.in98{resize:vertical;min-height:40px}
         <!-- EVENT PANEL — paste a video, find all reposts across all platforms -->
         <div class="ev-panel" id="evPanel">
           <div class="field"><label class="lbl98">Reference Video URL:</label><input class="in98" type="text" id="evRef" placeholder="https://www.tiktok.com/@user/video/... or any video URL"/></div>
+          <div class="field"><label class="lbl98">Additional URLs to include (one per line, optional):</label><textarea class="in98" id="evExtra" rows="3" placeholder="Paste any URLs you want included — TikTok, Instagram, etc. One per line."></textarea></div>
           <div class="btn-row">
             <button class="btn98" onclick="reset()">Clear</button>
             <button class="btn98 btn98-fire" id="evBtn" onclick="doEvent()">🔥 Find Every Angle</button>
@@ -1017,7 +1018,7 @@ async function doEvent(){
 
   try{
     const resp=await fetch('/api/event-search',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({url,platform:plat})});
+      body:JSON.stringify({url,platform:plat,extra_urls:($('evExtra').value||'').split('\n').map(u=>u.trim()).filter(u=>u.startsWith('http'))})});
     [t1,t2,t3].forEach(clearTimeout);
     const data=await resp.json();if(data.error)throw new Error(data.error);
     const res=data.results||[],own=data.own_posts||[],totals=data.totals||{},total=res.length+own.length;

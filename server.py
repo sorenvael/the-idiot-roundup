@@ -128,8 +128,8 @@ def anthropic_web_search(system, prompt, model="claude-sonnet-4-20250514", max_t
             r = requests.post("https://api.anthropic.com/v1/messages",
                               headers=headers, json=payload, timeout=120)
             if r.status_code == 429:
-                log("  [api] 429 rate limited — waiting 10s")
-                time.sleep(10)
+                log("  [api] 429 rate limited — waiting 60s for window reset...")
+                time.sleep(60)
                 r = requests.post("https://api.anthropic.com/v1/messages",
                                   headers=headers, json=payload, timeout=120)
             r.raise_for_status()
@@ -151,12 +151,15 @@ def anthropic_web_search(system, prompt, model="claude-sonnet-4-20250514", max_t
         if stop == "end_turn":
             break
         elif stop == "pause_turn":
-            messages.append({"role": "assistant", "content": content})
-            messages.append({"role": "user", "content": "Continue listing results."})
+            # Only send back text blocks — server_tool_use blocks can't be resent
+            text_blocks = [b for b in content if b.get("type") == "text"]
+            if text_blocks:
+                messages.append({"role": "assistant", "content": text_blocks})
+            else:
+                messages.append({"role": "assistant", "content": [{"type": "text", "text": "Searching..."}]})
+            messages.append({"role": "user", "content": "Continue. List all the URLs you found as a JSON array."})
         else:
-            # Unknown stop reason — try continuing
-            messages.append({"role": "assistant", "content": content})
-            messages.append({"role": "user", "content": "Continue."})
+            break
 
     log(f"  [api] Total text: {len(all_text)} chars")
     return all_text
@@ -564,13 +567,18 @@ class Handler(SimpleHTTPRequestHandler):
     def _handle_event_search(self, body):
         """Event Finder: paste URL, find reposts across all platforms, split own/others, scrape stats."""
         url = body.get("url", "").strip()
+        extra_urls = body.get("extra_urls", [])
         if not url:
             return self._json(400, {"error": "url required"})
 
         log(f"\n{'='*60}")
         log(f"[event-search] {url[:60]}")
+        if extra_urls:
+            log(f"[extra] {len(extra_urls)} additional URLs provided")
 
-        cached = cache_get("event_" + url)
+        # Include extra URLs in cache key so different extras = different cache
+        cache_key_str = "event_" + url + "_" + hashlib.md5(str(extra_urls).encode()).hexdigest()[:8]
+        cached = cache_get(cache_key_str)
         if cached:
             return self._json(200, cached)
 
@@ -582,36 +590,31 @@ class Handler(SimpleHTTPRequestHandler):
         relevant = get_relevant_accounts(meta["title"], meta["hashtags"])
         title_clean = re.sub(r"#\w+", "", meta["title"]).strip()
 
-        # Build specific per-account search instructions
+        # Top 8 accounts only to keep tokens low
         acct_searches = "\n".join(
-            f"- site:tiktok.com/@{a} {title_clean[:25]}" for a in relevant[:15]
+            f"- @{a}" for a in relevant[:8]
         )
 
-        system = ("You find reposts of viral videos across all social media platforms and news sites. "
-                  "Return ONLY a JSON array. Each object must have: platform, account_name, url, description. "
-                  "Include TikTok, Instagram, YouTube, Facebook, Twitter/X, and news articles. "
-                  "DO NOT include ticketing sites, Spotify, setlist sites, Wikipedia. "
-                  "CRITICAL: TikTok video IDs are 19 digits long. NEVER truncate URLs. "
-                  "Search thoroughly — find as many results as possible. Do at least 10 web searches.")
+        system = ("Find reposts of videos across TikTok, Instagram, YouTube, Facebook, Twitter, and news. "
+                  "Return ONLY a JSON array. Each object: platform, account_name, url, description. "
+                  "TikTok video IDs are 19 digits. NEVER truncate URLs.")
 
-        prompt = (f"Find ALL reposts and coverage of this video across every platform:\n\n"
-                  f"URL: {url}\n"
-                  f"Title: {meta['title']}\n"
-                  f"Author: @{meta['author']}\n\n"
-                  f"Do these searches:\n"
-                  f"1. General: {title_clean[:40]} tiktok\n"
-                  f"2. General: {title_clean[:40]} instagram\n"
-                  f"3. General: {title_clean[:40]} news\n"
-                  f"4. General: {title_clean[:40]} youtube\n\n"
-                  f"ALSO search for posts from these specific affiliated accounts:\n"
-                  f"{acct_searches}\n\n"
-                  f"Search EVERY account listed above. Return ALL videos you find. "
-                  f"This is critical — I need to find every affiliated account's post about this topic.")
+        prompt = (f"Find reposts of: {meta['title']}\nURL: {url}\nAuthor: @{meta['author']}\n\n"
+                  f"Also search for posts from these accounts about this:\n{acct_searches}\n\n"
+                  f"Return JSON array of all results.")
 
         log(f"  [step1] Web search ({len(relevant)} accounts in prompt)...")
         text = anthropic_web_search(system, prompt, max_tokens=8192)
         raw_results = parse_json_results(text)
         log(f"  [step1] Parsed {len(raw_results)} results")
+
+        # Step 2: Add extra URLs provided by the user
+        if extra_urls:
+            for eu in extra_urls:
+                eu = eu.strip()
+                if eu and eu.startswith("http"):
+                    raw_results.append({"url": eu, "platform": "tiktok", "account_name": "", "description": ""})
+            log(f"  [step2] Added {len(extra_urls)} user-provided URLs, total: {len(raw_results)}")
 
         # Step 3: Enrich each result
         seen = {url}  # skip the reference video itself
@@ -709,7 +712,7 @@ class Handler(SimpleHTTPRequestHandler):
             "own_totals": own_totals,
             "other_totals": other_totals,
         }
-        cache_set("event_" + url, response)
+        cache_set(cache_key_str, response)
         self._json(200, response)
 
     def _handle_feedback(self, body):
