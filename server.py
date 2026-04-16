@@ -608,7 +608,102 @@ class Handler(SimpleHTTPRequestHandler):
         raw_results = parse_json_results(text)
         log(f"  [step1] Parsed {len(raw_results)} results")
 
-        # Step 2: Add extra URLs provided by the user
+        # Step 2a: Profile scrape — find our accounts' posts with EXACT video URLs
+        if APIFY_TOKEN:
+            title_clean = re.sub(r"#\w+", "", meta["title"]).strip()
+            # Only match on very specific terms — not generic words
+            specific_terms = set()
+            for h in meta["hashtags"]:
+                h_lower = h.lower()
+                if h_lower not in {"zachbryan", "fyp", "foryou", "viral", "concert", "countrymusic", "country"}:
+                    specific_terms.add(h_lower)
+            # Add specific words from title (not generic ones)
+            generic = {"the", "a", "an", "in", "on", "at", "to", "for", "of", "and", "is", "was",
+                       "zach", "bryan", "joined", "saturday", "night", "his", "her", "he", "she"}
+            for w in title_clean.lower().split():
+                if len(w) > 4 and w not in generic:
+                    specific_terms.add(w)
+
+            log(f"  [step2a] Profile scrape — match terms: {specific_terms}")
+
+            for i in range(0, min(len(relevant), 20), 10):
+                batch = relevant[i:i+10]
+                try:
+                    items = run_apify("clockworks~tiktok-profile-scraper",
+                                     {"profiles": batch, "resultsPerPage": 10},
+                                     label=f"profiles {i//10+1}", poll_interval=3, max_polls=25)
+
+                    # Debug: log ALL fields from first item so we can find the right URL field
+                    if items and i == 0:
+                        sample = items[0]
+                        url_fields = {k: str(v)[:80] for k, v in sample.items()
+                                      if any(x in k.lower() for x in ["url", "link", "share", "id", "video"])}
+                        log(f"  [debug] URL-related fields in first item: {url_fields}")
+
+                    found = 0
+                    for item in items:
+                        desc = (item.get("text") or item.get("desc") or "").lower()
+                        if not specific_terms or not any(t in desc for t in specific_terms):
+                            continue
+
+                        author = (item.get("authorMeta", {}).get("name", "") or
+                                  item.get("author", {}).get("uniqueId", "") or
+                                  item.get("authorName", "") or "").lower()
+
+                        # Try every possible URL field — prioritize share URLs (short, no truncation)
+                        vid_url = ""
+                        for field in ["shareUrl", "shareLink", "shortUrl", "shortLink",
+                                      "webVideoUrl", "videoUrl", "url"]:
+                            v = item.get(field, "")
+                            if v and ("tiktok.com" in str(v) or "vm.tiktok.com" in str(v)):
+                                vid_url = str(v)
+                                break
+
+                        # If no URL found, try constructing from string ID
+                        if not vid_url:
+                            vid_id = item.get("id")
+                            if vid_id is not None and author:
+                                vid_url = f"https://www.tiktok.com/@{author}/video/{vid_id}"
+
+                        if not vid_url:
+                            continue
+
+                        so = item.get("stats") or item.get("statsV2") or {}
+                        def _pk(*keys):
+                            for src in [item, so]:
+                                for k in keys:
+                                    v = src.get(k)
+                                    if v is not None:
+                                        try:
+                                            val = int(v)
+                                            if val > 0: return val
+                                        except (ValueError, TypeError): pass
+                            return 0
+
+                        raw_results.append({
+                            "url": vid_url,
+                            "platform": "tiktok",
+                            "account_name": "@" + author if author else "@unknown",
+                            "description": desc[:200],
+                            "thumbnail": item.get("cover") or item.get("originCover") or "",
+                            "stats": {
+                                "plays": _pk("playCount", "plays", "viewCount"),
+                                "likes": _pk("diggCount", "likes", "likeCount"),
+                                "comments": _pk("commentCount", "comments"),
+                                "shares": _pk("shareCount", "shares"),
+                            },
+                            "_from_profile": True,
+                        })
+                        found += 1
+
+                    if found:
+                        log(f"    [profiles] Batch {i//10+1}: {found} matching posts with URLs")
+                except Exception as e:
+                    log(f"    [profiles] Batch {i//10+1} error: {e}")
+
+            log(f"  [step2a] Total after profiles: {len(raw_results)}")
+
+        # Step 2b: Add extra URLs provided by the user
         if extra_urls:
             for eu in extra_urls:
                 eu = eu.strip()
@@ -631,12 +726,36 @@ class Handler(SimpleHTTPRequestHandler):
                 continue
             seen.add(rurl)
 
-            enriched.append(enrich_result(rurl))
+            if r.get("_from_profile"):
+                enriched.append(r)  # already has all data from Apify
+            else:
+                enriched.append(enrich_result(rurl))
 
         log(f"  [step2] Enriched {len(enriched)} results")
 
-        # Step 4: Verify URLs are real
-        enriched = verify_urls_parallel(enriched)
+        # Step 4: Verify URLs — skip profile results (try oEmbed instead)
+        from_profiles = [r for r in enriched if r.get("_from_profile")]
+        from_web = [r for r in enriched if not r.get("_from_profile")]
+        from_web = verify_urls_parallel(from_web)
+
+        # For profile results, quick verify via oEmbed (faster than HEAD, also gets real data)
+        verified_profiles = []
+        for r in from_profiles:
+            if "vm.tiktok.com" in r["url"] or len(re.findall(r"/video/(\d{18,})", r["url"])) > 0:
+                verified_profiles.append(r)  # URL looks complete
+            else:
+                # Try oEmbed — if it works, the URL is real
+                try:
+                    oe = requests.get(f"https://www.tiktok.com/oembed?url={quote_plus(r['url'])}", headers=HDRS, timeout=5)
+                    if oe.ok:
+                        verified_profiles.append(r)
+                    else:
+                        log(f"    DEAD (profile): {r['account_name']} {r['url'][:50]}")
+                except Exception:
+                    log(f"    DEAD (profile): {r['account_name']} {r['url'][:50]}")
+
+        enriched = verified_profiles + from_web
+        log(f"  [step4] {len(verified_profiles)} profile + {len(from_web)} web = {len(enriched)} total")
 
         # Step 5: Scrape stats by platform
         by_plat = {}
