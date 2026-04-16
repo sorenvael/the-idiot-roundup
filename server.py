@@ -578,53 +578,40 @@ class Handler(SimpleHTTPRequestHandler):
         meta = get_metadata(url)
         log(f"  [meta] Title: {meta['title'][:60]}, Author: {meta['author']}")
 
-        # Step 2: Build dynamic search prompt with relevant accounts
+        # Step 2: Build ONE comprehensive search prompt
         relevant = get_relevant_accounts(meta["title"], meta["hashtags"])
-        accounts_block = "\n".join(f"  - @{a}" for a in relevant[:10])
+        title_clean = re.sub(r"#\w+", "", meta["title"]).strip()
+
+        # Build specific per-account search instructions
+        acct_searches = "\n".join(
+            f"- site:tiktok.com/@{a} {title_clean[:25]}" for a in relevant[:15]
+        )
 
         system = ("You find reposts of viral videos across all social media platforms and news sites. "
                   "Return ONLY a JSON array. Each object must have: platform, account_name, url, description. "
                   "Include TikTok, Instagram, YouTube, Facebook, Twitter/X, and news articles. "
                   "DO NOT include ticketing sites, Spotify, setlist sites, Wikipedia. "
                   "CRITICAL: TikTok video IDs are 19 digits long. NEVER truncate URLs. "
-                  "Search thoroughly — find as many results as possible.")
+                  "Search thoroughly — find as many results as possible. Do at least 10 web searches.")
 
-        prompt = (f"Find all reposts and coverage of this video:\n\n"
+        prompt = (f"Find ALL reposts and coverage of this video across every platform:\n\n"
                   f"URL: {url}\n"
                   f"Title: {meta['title']}\n"
                   f"Author: @{meta['author']}\n\n"
-                  f"ALSO specifically search for posts about this from these affiliated accounts:\n"
-                  f"{accounts_block}\n\n"
-                  f"Search each of those accounts on TikTok for posts about this same topic. "
-                  f"Return as many results as you can find.")
+                  f"Do these searches:\n"
+                  f"1. General: {title_clean[:40]} tiktok\n"
+                  f"2. General: {title_clean[:40]} instagram\n"
+                  f"3. General: {title_clean[:40]} news\n"
+                  f"4. General: {title_clean[:40]} youtube\n\n"
+                  f"ALSO search for posts from these specific affiliated accounts:\n"
+                  f"{acct_searches}\n\n"
+                  f"Search EVERY account listed above. Return ALL videos you find. "
+                  f"This is critical — I need to find every affiliated account's post about this topic.")
 
         log(f"  [step1] Web search ({len(relevant)} accounts in prompt)...")
-        text = anthropic_web_search(system, prompt)
+        text = anthropic_web_search(system, prompt, max_tokens=8192)
         raw_results = parse_json_results(text)
         log(f"  [step1] Parsed {len(raw_results)} results")
-
-        # Step 2: Second web search — specifically find our accounts' posts
-        title_clean = re.sub(r"#\w+", "", meta["title"]).strip()
-        # Build focused search queries per account batch
-        acct_batches = [relevant[i:i+6] for i in range(0, min(len(relevant), 18), 6)]
-        for bi, batch in enumerate(acct_batches):
-            acct_searches = "\n".join(
-                f"- site:tiktok.com/@{a} {title_clean[:30]}" for a in batch
-            )
-            prompt2 = (f"Find TikTok videos from these SPECIFIC accounts about: {title_clean}\n\n"
-                       f"Search each one:\n{acct_searches}\n\n"
-                       f"Return ONLY a JSON array. Each object: platform, account_name, url, description. "
-                       f"TikTok video IDs are 19 digits — NEVER truncate URLs.")
-            log(f"  [step2] Own accounts batch {bi+1}/{len(acct_batches)}: {batch}")
-            text2 = anthropic_web_search(
-                "You find specific TikTok accounts' posts. Return ONLY a JSON array. NEVER truncate URLs.",
-                prompt2, max_tokens=2048)
-            batch_results = parse_json_results(text2)
-            if batch_results:
-                log(f"  [step2] Found {len(batch_results)} from batch {bi+1}")
-                raw_results.extend(batch_results)
-
-        log(f"  [step2] Total after own account search: {len(raw_results)}")
 
         # Step 3: Enrich each result
         seen = {url}  # skip the reference video itself
