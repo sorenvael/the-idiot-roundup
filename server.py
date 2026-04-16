@@ -603,6 +603,29 @@ class Handler(SimpleHTTPRequestHandler):
         raw_results = parse_json_results(text)
         log(f"  [step1] Parsed {len(raw_results)} results")
 
+        # Step 2: Second web search — specifically find our accounts' posts
+        title_clean = re.sub(r"#\w+", "", meta["title"]).strip()
+        # Build focused search queries per account batch
+        acct_batches = [relevant[i:i+6] for i in range(0, min(len(relevant), 18), 6)]
+        for bi, batch in enumerate(acct_batches):
+            acct_searches = "\n".join(
+                f"- site:tiktok.com/@{a} {title_clean[:30]}" for a in batch
+            )
+            prompt2 = (f"Find TikTok videos from these SPECIFIC accounts about: {title_clean}\n\n"
+                       f"Search each one:\n{acct_searches}\n\n"
+                       f"Return ONLY a JSON array. Each object: platform, account_name, url, description. "
+                       f"TikTok video IDs are 19 digits — NEVER truncate URLs.")
+            log(f"  [step2] Own accounts batch {bi+1}/{len(acct_batches)}: {batch}")
+            text2 = anthropic_web_search(
+                "You find specific TikTok accounts' posts. Return ONLY a JSON array. NEVER truncate URLs.",
+                prompt2, max_tokens=2048)
+            batch_results = parse_json_results(text2)
+            if batch_results:
+                log(f"  [step2] Found {len(batch_results)} from batch {bi+1}")
+                raw_results.extend(batch_results)
+
+        log(f"  [step2] Total after own account search: {len(raw_results)}")
+
         # Step 3: Enrich each result
         seen = {url}  # skip the reference video itself
         enriched = []
