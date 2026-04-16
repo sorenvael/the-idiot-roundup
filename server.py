@@ -603,82 +603,7 @@ class Handler(SimpleHTTPRequestHandler):
         raw_results = parse_json_results(text)
         log(f"  [step1] Parsed {len(raw_results)} results")
 
-        # Step 2b: Scrape our accounts' profiles for matching posts
-        if APIFY_TOKEN:
-            title_words = re.sub(r"#\w+", "", meta["title"]).lower().split()
-            match_terms = {w for w in title_words if len(w) > 3}
-            match_terms.update(h.lower() for h in meta["hashtags"])
-            log(f"  [step2b] Scraping {len(relevant)} account profiles (match: {list(match_terms)[:5]})...")
-
-            # Batch profiles — scrape 10 at a time
-            for i in range(0, len(relevant), 10):
-                batch = relevant[i:i+10]
-                try:
-                    items = run_apify("clockworks~tiktok-profile-scraper",
-                                     {"profiles": batch, "resultsPerPage": 10},
-                                     label=f"profiles batch {i//10+1}", poll_interval=3, max_polls=25)
-                    found = 0
-                    for item in items:
-                        author = (item.get("authorMeta", {}).get("name", "") or
-                                  item.get("author", {}).get("uniqueId", "") or
-                                  item.get("authorName", "") or item.get("uniqueId", "") or "").lower()
-                        desc = (item.get("text") or item.get("desc") or "").lower()
-
-                        # Check if this post matches the reference video topic
-                        if not any(t in desc for t in match_terms):
-                            continue
-
-                        # Build best URL we can — link to profile if video URL is truncated
-                        vid_url = item.get("webVideoUrl") or item.get("videoUrl") or item.get("url") or ""
-                        vid_id = str(item.get("id") or item.get("videoId") or "")
-                        if vid_id and len(vid_id) >= 18 and author:
-                            vid_url = f"https://www.tiktok.com/@{author}/video/{vid_id}"
-
-                        if not vid_url and author:
-                            vid_url = f"https://www.tiktok.com/@{author}"
-
-                        # Extract stats directly from Apify data (no separate scrape needed)
-                        so = item.get("stats") or item.get("statsV2") or {}
-                        def _pick(*keys):
-                            for src in [item, so]:
-                                for k in keys:
-                                    v = src.get(k)
-                                    if v is not None:
-                                        try:
-                                            val = int(v)
-                                            if val > 0: return val
-                                        except (ValueError, TypeError): pass
-                            return 0
-
-                        stats = {
-                            "plays": _pick("playCount", "plays", "viewCount"),
-                            "likes": _pick("diggCount", "likes", "likeCount"),
-                            "comments": _pick("commentCount", "comments"),
-                            "shares": _pick("shareCount", "shares"),
-                        }
-
-                        thumbnail = (item.get("cover") or item.get("originCover") or
-                                     item.get("dynamicCover") or item.get("videoMeta", {}).get("coverUrl", "") or "")
-
-                        raw_results.append({
-                            "url": vid_url,
-                            "platform": "tiktok",
-                            "account_name": "@" + author if author else "@unknown",
-                            "description": desc[:200],
-                            "thumbnail": thumbnail,
-                            "stats": stats,
-                            "_from_profile": True,  # flag: skip URL verification, stats already scraped
-                        })
-                        found += 1
-                    if found:
-                        log(f"    [profiles] Batch {i//10+1}: {found} matching posts")
-                except Exception as e:
-                    log(f"    [profiles] Batch {i//10+1} error: {e}")
-
-            log(f"  [step2b] Total results after profile scrape: {len(raw_results)}")
-
         # Step 3: Enrich each result
-        # Profile-scraped results already have all data — skip enrichment for them
         seen = {url}  # skip the reference video itself
         enriched = []
         for r in raw_results:
@@ -693,32 +618,20 @@ class Handler(SimpleHTTPRequestHandler):
                 continue
             seen.add(rurl)
 
-            if r.get("_from_profile"):
-                # Already enriched by Apify — keep as-is
-                enriched.append(r)
-            else:
-                # Web search result — enrich with oEmbed
-                enriched.append(enrich_result(rurl))
+            enriched.append(enrich_result(rurl))
 
         log(f"  [step2] Enriched {len(enriched)} results")
 
-        # Step 4: Verify URLs are real (skip profile-scraped results — their data is already verified by Apify)
-        from_profiles = [r for r in enriched if r.get("_from_profile")]
-        from_web = [r for r in enriched if not r.get("_from_profile")]
-        if from_web:
-            from_web = verify_urls_parallel(from_web)
-        enriched = from_profiles + from_web
-        log(f"  [step4] {len(from_profiles)} profile results (trusted) + {len(from_web)} web results (verified)")
+        # Step 4: Verify URLs are real
+        enriched = verify_urls_parallel(enriched)
 
         # Step 5: Scrape stats by platform
         by_plat = {}
         for r in enriched:
             by_plat.setdefault(r["platform"], []).append(r["url"])
 
-        # Only scrape stats for TikTok URLs from web search (profile results already have stats)
         tiktok_need_stats = [r["url"] for r in enriched
-                             if r["platform"] == "tiktok" and not r.get("_from_profile")
-                             and not r.get("stats", {}).get("plays") and "/video/" in r["url"]]
+                             if r["platform"] == "tiktok" and "/video/" in r["url"]]
         if tiktok_need_stats:
             log(f"  [step5] Scraping stats for {len(tiktok_need_stats)} TikTok videos (web search only)...")
             tk_stats = scrape_tiktok_stats(tiktok_need_stats)
